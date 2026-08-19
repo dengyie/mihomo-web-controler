@@ -2,7 +2,9 @@
 
 Mihomo (Clash Meta) Web 控制面板与自定义规则管理网关套件。
 
-本项目基于 zashboard 进行了深度二开与控制面扩展，提供了安全且具备持久化保障的 Mihomo 规则管理、API 鉴权代理、语法预检与 Keeper 守护协同能力。
+- **项目主页**：[https://github.com/dengyie/mihomo-web-controler](https://github.com/dengyie/mihomo-web-controler)
+- **作者**：dengyie
+- **许可证**：MIT
 
 ---
 
@@ -33,7 +35,7 @@ Mihomo (Clash Meta) Web 控制面板与自定义规则管理网关套件。
 
 5. **网络与 CPA 强隔离**
    - 仅调用 Mihomo Controller HTTP API（`PUT /configs?force=true`）进行无损热重载。
-   - 绝不使用全局 broad-kill（如 `start-clash.sh` / `pkill`），确保 CPA egress（`8317` / `10808`）零中断。
+   - 绝不使用全局 broad-kill（如 `start-clash.sh` / `pkill`），确保独立代理栈零中断。
 
 ---
 
@@ -43,19 +45,19 @@ Mihomo (Clash Meta) Web 控制面板与自定义规则管理网关套件。
 浏览器 (Web UI)
   │ HTTPS
   ▼
-Cloudflare Tunnel (3x-ui.mangoqwq.com)
+Cloudflare Tunnel / 反向代理
   │
   ▼
 127.0.0.1:2053 (gateway.py)
-  ├── 静态资源: /personal/zashboard/dist/ (含 assets/user-rules-ui.js)
+  ├── 静态资源: zashboard/dist/ (含 assets/user-rules-ui.js)
   ├── 代理 Controller API: /panel/api/* ──(注入 secret)──> 127.0.0.1:9090 (主 Mihomo Controller)
   └── 自定义规则 REST API: /panel/api/user-rules
                                │
                                ▼
-            /personal/clash/rules-reconciler.py (排他锁 flock)
+            clash/rules-reconciler.py (排他锁 flock)
                                │
                                ├── 1. 严格 Schema / 域名 / CIDR 校验
-                               ├── 2. 写入权威源: /personal/clash/rules/user-rules.yaml
+                               ├── 2. 写入权威源: rules/user-rules.yaml
                                ├── 3. mihomo -t 候选语法预检
                                ├── 4. 自动生成 .pre-user-rules-<ts> 备份
                                ├── 5. 原子替换 config.yaml & config.mac-merged.yaml
@@ -74,22 +76,41 @@ Cloudflare Tunnel (3x-ui.mangoqwq.com)
 │   └── clash-keeper-loop.sh    # Keeper 常驻守护脚本
 └── zashboard/
     ├── gateway.py              # API 网关 (鉴权、反向代理、WebSocket、REST CRUD)
-    └── dist/                   # zashboard 静态资源产物
+    └── dist/                   # Web 面板静态资源产物
         ├── assets/
-        │   └── user-rules-ui.js # 二开前端规则管理扩展组件 (Modal、DOM 挂载、XSS 净化)
+        │   └── user-rules-ui.js # 二开前端规则管理扩展组件 (Modal、DOM 锚定、XSS 净化)
         └── index.html          # Web 面板入口
+```
+
+---
+
+## 🚀 启动与使用
+
+### 1. 启动 API 网关与 Web 面板
+```bash
+python3 zashboard/gateway.py
+```
+
+### 2. 手动执行规则同步与预检
+```bash
+# 语法预检 (Dry Run)
+python3 clash/rules-reconciler.py --dry-run
+
+# 执行合并与热重载
+python3 clash/rules-reconciler.py --reconcile
 ```
 
 ---
 
 ## 🔐 敏感信息过滤与安全说明
 
-- 本仓库已将生产真实密码（`panel.password`）与控制器密钥（`.controller-secret`）加入 `.gitignore`，严禁上传生产凭证。
+- 本仓库已将生产真实密码（`panel.password`）与控制器密钥（`.controller-secret`）加入 `.gitignore`。
 - 部署时请在 `zashboard/panel.password` 与 `clash/.controller-secret` 中填入对应环境的实际密钥。
 
 ---
 
-## 📄 开源与致谢
+## 📄 License & Attribution
 
-- 前端核心基于 [zashboard](https://github.com/Zephyruso/zashboard)。
-- 规则调度与核心逻辑遵循 [Mihomo (Clash.Meta)](https://github.com/MetaCubeX/mihomo) 规范。
+- Author: **dengyie** ([https://github.com/dengyie](https://github.com/dengyie))
+- Project: [https://github.com/dengyie/mihomo-web-controler](https://github.com/dengyie/mihomo-web-controler)
+- License: MIT
