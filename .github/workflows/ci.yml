@@ -1,0 +1,105 @@
+name: CI & Build Release Package
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-package:
+    name: Validate, Test & Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies & Linter
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyflakes pyyaml
+
+      - name: Syntax & Lint check Python files
+        run: |
+          echo "Checking Python syntax and basic errors..."
+          pyflakes clash/rules-reconciler.py clash/apply-local-import.py zashboard/gateway.py
+          python3 -m py_compile clash/rules-reconciler.py clash/apply-local-import.py zashboard/gateway.py
+          echo "All Python scripts passed syntax validation."
+
+      - name: Validate JSON & Web Assets
+        run: |
+          echo "Validating package.json and webmanifest..."
+          node -e "JSON.parse(fs.readFileSync('package.json'))"
+          node -e "JSON.parse(fs.readFileSync('zashboard/dist/manifest.webmanifest'))"
+          echo "JSON files are valid."
+
+      - name: Build Deployable Package
+        id: build_pkg
+        run: |
+          VERSION=${GITHUB_REF_NAME:-latest}
+          PKG_NAME="mihomo-web-controler-${VERSION}.tar.gz"
+          PKG_LATEST="mihomo-web-controler-latest.tar.gz"
+
+          echo "Packaging deployment artifact..."
+          tar -czf "$PKG_NAME" \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='*.pyc' \
+            --exclude='__pycache__' \
+            --exclude='*.lock' \
+            --exclude='*.tmp' \
+            --exclude='*.candidate' \
+            --exclude='*.log' \
+            --exclude='panel.password' \
+            --exclude='.controller-secret' \
+            clash/ zashboard/ package.json README.md .gitignore
+
+          cp "$PKG_NAME" "$PKG_LATEST"
+          sha256sum "$PKG_NAME" > "${PKG_NAME}.sha256"
+          sha256sum "$PKG_LATEST" > "${PKG_LATEST}.sha256"
+
+          echo "pkg_name=$PKG_NAME" >> $GITHUB_OUTPUT
+          echo "pkg_latest=$PKG_LATEST" >> $GITHUB_OUTPUT
+          ls -lh mihomo-web-controler-*.tar.gz
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-web-controler-build
+          path: |
+            mihomo-web-controler-*.tar.gz
+            mihomo-web-controler-*.sha256
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.build_pkg.outputs.pkg_name }}
+            ${{ steps.build_pkg.outputs.pkg_name }}.sha256
+            ${{ steps.build_pkg.outputs.pkg_latest }}
+            ${{ steps.build_pkg.outputs.pkg_latest }}.sha256
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true

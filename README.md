@@ -84,9 +84,19 @@ Cloudflare Tunnel / 反向代理
 
 ---
 
-## 🚀 启动与使用
+## 🚀 启动与部署
 
-### 1. 启动 API 网关与 Web 面板
+### 1. 部署与自动化打包 (CI/CD)
+本项目已配置 GitHub Actions 自动化工作流：
+- **触发条件**：每次 push 到 `main` 分支、发起 PR 或打 Tag（如 `v1.0.0`）。
+- **打包产物**：自动生成 `mihomo-web-controler-latest.tar.gz` 及对应校验和并上传 Artifacts。
+- **一键下载部署**：
+  ```bash
+  # 下载最新构建包并解压至目标目录
+  tar -xzf mihomo-web-controler-latest.tar.gz -C /personal/
+  ```
+
+### 2. 启动 API 网关与 Web 面板
 ```bash
 python3 zashboard/gateway.py
 ```
