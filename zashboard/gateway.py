@@ -9,7 +9,6 @@ import secrets
 import select
 import socket
 import socketserver
-import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
