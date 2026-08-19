@@ -1,0 +1,27 @@
+# Logs
+*.log
+logs/
+
+# Secrets and credentials
+*.password
+*.secret
+.controller-secret
+panel.password
+
+# Temporary and runtime files
+*.tmp
+*.candidate
+*.pid
+cache.db
+*.lock
+__pycache__/
+*.pyc
+
+# Local backups
+*.bak*
+*.pre-*
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
