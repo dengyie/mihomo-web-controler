@@ -95,12 +95,14 @@ def validate_rule_item(rule: Dict[str, Any], allowed_targets: Optional[Set[str]]
             return False, f"Invalid domain payload: '{payload}'"
     elif rule_type == 'IP-CIDR':
         try:
-            ipaddress.IPv4Network(payload, strict=False)
+            net = ipaddress.IPv4Network(payload, strict=False)
+            rule['payload'] = str(net)
         except Exception as e:
             return False, f"Invalid IPv4 CIDR: {e}"
     elif rule_type == 'IP-CIDR6':
         try:
-            ipaddress.IPv6Network(payload, strict=False)
+            net = ipaddress.IPv6Network(payload, strict=False)
+            rule['payload'] = str(net)
         except Exception as e:
             return False, f"Invalid IPv6 CIDR: {e}"
 
@@ -116,6 +118,16 @@ def validate_rule_item(rule: Dict[str, Any], allowed_targets: Optional[Set[str]]
 def rule_to_string(rule: Dict[str, Any]) -> str:
     rule_type = str(rule['type']).upper()
     payload = str(rule['payload']).strip()
+    if rule_type == 'IP-CIDR':
+        try:
+            payload = str(ipaddress.IPv4Network(payload, strict=False))
+        except Exception:
+            pass
+    elif rule_type == 'IP-CIDR6':
+        try:
+            payload = str(ipaddress.IPv6Network(payload, strict=False))
+        except Exception:
+            pass
     target = str(rule['target']).strip()
     params = rule.get('params')
     if params and isinstance(params, str) and params.strip():
@@ -330,10 +342,23 @@ def add_or_update_rule(rule_dict: Dict[str, Any]) -> Dict[str, Any]:
         rule_id = rule_dict['id']
         found_idx = next((i for i, r in enumerate(rules) if r.get('id') == rule_id), -1)
 
+        rule_type = str(rule_dict['type']).upper()
+        payload = str(rule_dict['payload']).strip()
+        if rule_type == 'IP-CIDR':
+            try:
+                payload = str(ipaddress.IPv4Network(payload, strict=False))
+            except Exception:
+                pass
+        elif rule_type == 'IP-CIDR6':
+            try:
+                payload = str(ipaddress.IPv6Network(payload, strict=False))
+            except Exception:
+                pass
+
         rule_entry = {
             'id': rule_id,
-            'type': str(rule_dict['type']).upper(),
-            'payload': str(rule_dict['payload']).strip(),
+            'type': rule_type,
+            'payload': payload,
             'target': str(rule_dict['target']).strip(),
             'enabled': bool(rule_dict.get('enabled', True)),
             'source': 'ui-user',
