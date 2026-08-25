@@ -389,6 +389,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 saved_headers = [(k, v) for k, v in resp.getheaders()
                                  if k.lower() in ('content-type', 'content-encoding', 'vary')]
                 cache_put('local', method, api_path(rel_path), query, resp.status, saved_headers, data)
+        except Exception as e:
+            # Only a failure to reach/read the UPSTREAM counts as a backend
+            # failure. Writing to a disconnecting client must NOT do so.
+            cache_fail('local')
+            self.send_error(502, str(e))
+            return
+        finally:
+            conn.close()
+        try:
             self.send_response(resp.status)
             for k, v in resp.getheaders():
                 if k.lower() not in ('connection', 'transfer-encoding', 'content-length'):
@@ -396,11 +405,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+        except (ConnectionResetError, BrokenPipeError):
+            return  # client went away; not an upstream failure
         except Exception as e:
-            cache_fail('local')
             self.send_error(502, str(e))
-        finally:
-            conn.close()
 
     def _websocket(self, rel_path: str):
         if not authorized(self):
@@ -493,6 +501,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 saved_headers = [(k, v) for k, v in resp.getheaders()
                                  if k.lower() in ('content-type', 'content-encoding', 'vary')]
                 cache_put(node, method, api_path(rel_path), query, resp.status, saved_headers, data)
+        except Exception as e:
+            # Only a failure to reach/read the remote gateway counts as a
+            # backend failure; a client that disconnects mid-write must not.
+            cache_fail(node)
+            self.send_error(502, f"Remote gateway error ({remote_ip}:{remote_port}): {e}")
+            return
+        finally:
+            conn.close()
+        try:
             self.send_response(resp.status)
             for k, v in resp.getheaders():
                 if k.lower() not in ('connection', 'transfer-encoding', 'content-length'):
@@ -500,11 +517,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+        except (ConnectionResetError, BrokenPipeError):
+            return  # client went away; not an upstream failure
         except Exception as e:
-            cache_fail(node)
             self.send_error(502, f"Remote gateway error ({remote_ip}:{remote_port}): {e}")
-        finally:
-            conn.close()
 
     def _forward_remote_ws(self, remote_ip: str, remote_port: int, remote_path_with_query: str):
         if not authorized(self):
