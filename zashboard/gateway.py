@@ -288,9 +288,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for key, value in self.headers.items():
                 if key.lower() not in ('host', 'connection', 'upgrade', 'authorization'):
                     lines.append(f'{key}: {value}')
-            upstream.sendall(('\\r\\n'.join(lines) + '\\r\\n\\r\\n').encode())
+            upstream.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
             response = b''
-            while b'\\r\\n\\r\\n' not in response:
+            while b'\r\n\r\n' not in response:
                 chunk = upstream.recv(4096)
                 if not chunk:
                     break
@@ -364,9 +364,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     lines.append(f'{key}: {value}')
             if not any(k.lower() == 'authorization' for k in self.headers):
                 lines.append('Authorization: Bearer ' + panel_password())
-            upstream.sendall(('\\r\\n'.join(lines) + '\\r\\n\\r\\n').encode())
+            upstream.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
             response = b''
-            while b'\\r\\n\\r\\n' not in response:
+            while b'\r\n\r\n' not in response:
                 chunk = upstream.recv(4096)
                 if not chunk:
                     break
