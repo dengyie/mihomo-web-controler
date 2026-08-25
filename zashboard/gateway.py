@@ -9,6 +9,8 @@ import secrets
 import select
 import socket
 import socketserver
+import threading
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -91,6 +93,72 @@ def panel_password():
 
 STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
 
+# ---------------------------------------------------------------------------
+# In-memory TTL cache for idempotent / re-readable GET endpoints.
+# Key = (node, method, api_path, query); nodes are 'local' (this host's own
+# mihomo) and 'pxed'/'tebi' (remote node reached over the VPC). caches are
+# per-node isolated so we never mix two backends' data.
+# ---------------------------------------------------------------------------
+CACHE_LOCK = threading.Lock()
+CACHE = {}
+CACHE_TTL_DEFAULT = 3
+CACHE_TTL = {'/version': 30, '/configs': 5, '/rules': 5}
+CACHE_MAX_BYTES = 20 * 1024 * 1024
+REFRESH_HEADER = 'X-Zashboard-Refresh'
+
+
+def _is_cacheable(method: str, api_p: str) -> bool:
+    if method != 'GET':
+        return False
+    if api_p in STREAM_ENDPOINTS:          # real-time streams -> never cache
+        return False
+    if api_p == '/delay' or api_p.endswith('/delay'):
+        return False                      # live latency tests
+    if api_p.endswith('/healthcheck'):
+        return False
+    if api_p.startswith('/user-rules') or api_p.startswith('/storage'):
+        return False
+    return True
+
+
+def _cache_ttl(api_p: str) -> float:
+    return CACHE_TTL.get(api_p, CACHE_TTL_DEFAULT)
+
+
+def cache_get(node: str, method: str, api_p: str, query: str):
+    if not _is_cacheable(method, api_p):
+        return None
+    key = (node, method, api_p, query)
+    with CACHE_LOCK:
+        ent = CACHE.get(key)
+        if not ent:
+            return None
+        if time.time() - ent['ts'] > _cache_ttl(api_p):
+            CACHE.pop(key, None)
+            return None
+        return ent
+
+
+def cache_put(node: str, method: str, api_p: str, query: str, status: int, headers, body: bytes):
+    if not _is_cacheable(method, api_p):
+        return
+    if len(body) > CACHE_MAX_BYTES:
+        return
+    key = (node, method, api_p, query)
+    with CACHE_LOCK:
+        CACHE[key] = {'ts': time.time(), 'status': status, 'headers': headers, 'body': body}
+
+
+def cache_invalidate(node: str):
+    with CACHE_LOCK:
+        for k in [k for k in CACHE if k[0] == node]:
+            CACHE.pop(k, None)
+
+
+def cache_stats():
+    with CACHE_LOCK:
+        return len(CACHE)
+
 
 def api_path(raw_path):
     return urlsplit(raw_path).path.split('/panel/api', 1)[-1] or '/'
@@ -114,6 +182,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _reply_cached(self, ent):
+        self.send_response(ent['status'])
+        for k, v in ent['headers']:
+            self.send_header(k, v)
+        self.send_header('Content-Length', str(len(ent['body'])))
+        self.end_headers()
+        self.wfile.write(ent['body'])
 
     def _handle_user_rules(self, method: str, rel_path: str):
         if not authorized(self):
@@ -157,6 +233,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if method == 'POST':
             if subpath == 'reconcile':
                 res = reconciler.reconcile()
+                if res.get('success'):
+                    cache_invalidate('local')
                 self.send_json(200 if res.get('success') else 500, res)
                 return
             if not isinstance(payload, dict):
@@ -165,6 +243,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if 'id' not in payload:
                 payload['id'] = f"user-{secrets.token_hex(6)}"
             res = reconciler.add_or_update_rule(payload)
+            if res.get('success'):
+                cache_invalidate('local')
             self.send_json(200 if res.get('success') else 400, res)
             return
 
@@ -198,6 +278,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             target_rule.update(payload)
             target_rule['id'] = rule_id
             res = reconciler.add_or_update_rule(target_rule)
+            if res.get('success'):
+                cache_invalidate('local')
             self.send_json(200 if res.get('success') else 400, res)
             return
 
@@ -207,6 +289,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             rule_id = subpath
             res = reconciler.delete_rule(rule_id)
+            if res.get('success'):
+                cache_invalidate('local')
             self.send_json(200 if res.get('success') else 404, res)
             return
 
@@ -226,6 +310,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if method not in ('GET', 'HEAD', 'OPTIONS'):
+            cache_invalidate('local')
+
         # Path: /panel/api/<clash-api-path> -> localhost:9090/<path>
         suffix = rel_path[len('/panel/api'):]
         query_params = parse_qs(urlsplit(self.path).query)
@@ -240,6 +327,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 query_params['url'] = ['https://cloudflare.com/cdn-cgi/trace']
         query = ('?' + urlencode(query_params, doseq=True)) if query_params else ''
         target = suffix or '/'
+
+        # Cache fast-path for re-readable GETs (skip on refresh header).
+        if method == 'GET' and target not in STREAM_ENDPOINTS and not suffix.endswith(('/delay', '/healthcheck')):
+            refresh = self.headers.get(REFRESH_HEADER, '') == '1'
+            api_p = api_path(rel_path)
+            ent = None if refresh else cache_get('local', method, api_p, query)
+            if ent is not None:
+                self._reply_cached(ent)
+                return
+
         conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=30)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection', 'content-length')}
         headers['Host'] = '127.0.0.1:9090'
@@ -254,6 +351,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             conn.request(method, target + query, body=body, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
+            if method == 'GET' and resp.status == 200 and target not in STREAM_ENDPOINTS and not suffix.endswith(('/delay', '/healthcheck')):
+                saved_headers = [(k, v) for k, v in resp.getheaders()
+                                 if k.lower() in ('content-type', 'vary')]
+                cache_put('local', method, api_path(rel_path), query, resp.status, saved_headers, data)
             self.send_response(resp.status)
             for k, v in resp.getheaders():
                 if k.lower() not in ('connection', 'transfer-encoding', 'content-length'):
@@ -316,13 +417,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             upstream.close()
 
-    def _forward_remote_http(self, method: str, remote_ip: str, remote_port: int, remote_path_with_query: str):
+    def _forward_remote_http(self, method: str, remote_ip: str, remote_port: int, remote_path_with_query: str, node: str):
         if not authorized(self):
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.send_header('WWW-Authenticate', 'Bearer')
             self.end_headers()
             return
+
+        rel_path = remote_path_with_query.split('?', 1)[0]
+        raw_query = remote_path_with_query.split('?', 1)[1] if '?' in remote_path_with_query else ''
+        query = ('?' + raw_query) if raw_query else ''
+
+        if method not in ('GET', 'HEAD', 'OPTIONS'):
+            cache_invalidate(node)
+
+
+        if method == 'GET' and not rel_path.endswith(('/delay', '/healthcheck')):
+            refresh = self.headers.get(REFRESH_HEADER, '') == '1'
+            api_p = api_path(rel_path)
+            ent = None if refresh else cache_get(node, method, api_p, query)
+            if ent is not None:
+                self._reply_cached(ent)
+                return
 
         conn = http.client.HTTPConnection(remote_ip, remote_port, timeout=30)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection', 'content-length')}
@@ -335,6 +452,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             conn.request(method, remote_path_with_query, body=body, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
+            if method == 'GET' and resp.status == 200 and not rel_path.endswith(('/delay', '/healthcheck')):
+                saved_headers = [(k, v) for k, v in resp.getheaders()
+                                 if k.lower() in ('content-type', 'vary')]
+                cache_put(node, method, api_path(rel_path), query, resp.status, saved_headers, data)
             self.send_response(resp.status)
             for k, v in resp.getheaders():
                 if k.lower() not in ('connection', 'transfer-encoding', 'content-length'):
@@ -421,7 +542,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_response(204)
                 self.end_headers()
                 return
-            return self._forward_remote_http(method, remote_ip, remote_port, rel_path + query)
+            return self._forward_remote_http(method, remote_ip, remote_port, rel_path + query, target_node)
 
         # Local handling
         if is_ws:
@@ -518,4 +639,32 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__ == '__main__':
     record_node_ip()
+
+    WARM_INTERVAL = 10
+    WARM_ENDPOINTS = ['/version', '/proxies', '/rules', '/configs']
+
+    def _warm_loop():
+        token = panel_password()
+        remote_prefix = '/panel/pxed/api' if not is_pxed_host() else '/panel/tebi/api'
+        while True:
+            for prefix in ('/panel/api', remote_prefix):
+                for ep in WARM_ENDPOINTS:
+                    try:
+                        conn = http.client.HTTPConnection('127.0.0.1', 2053, timeout=15)
+                        conn.request('GET', prefix + ep, headers={
+                            'Authorization': 'Bearer ' + token,
+                            REFRESH_HEADER: '1',
+                        })
+                        resp = conn.getresponse()
+                        resp.read()
+                        conn.close()
+                    except Exception:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+            time.sleep(WARM_INTERVAL)
+
+    threading.Thread(target=_warm_loop, daemon=True).start()
+
     Server(('0.0.0.0', 2053), Handler).serve_forever()
