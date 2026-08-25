@@ -642,25 +642,29 @@ if __name__ == '__main__':
     WARM_ENDPOINTS = ['/version', '/proxies', '/rules', '/configs']
 
     def _warm_loop():
+        # Only warm this host's OWN local mihomo (/panel/api). Each gateway keeps
+        # its own local cache warm; we deliberately do NOT poll the remote node
+        # over the slow VPC (e.g. tebi poking pxed). That remote polling was
+        # redundant (pxed warms itself) and, when pxed was overloaded, spammed
+        # 502s into the other host's gateway log -- exactly the "pxed error on
+        # tebi" the user saw. Local-only warming keeps every node fast and quiet.
         token = panel_password()
-        remote_prefix = '/panel/pxed/api' if not is_pxed_host() else '/panel/tebi/api'
         while True:
-            for prefix in ('/panel/api', remote_prefix):
-                for ep in WARM_ENDPOINTS:
+            for ep in WARM_ENDPOINTS:
+                try:
+                    conn = http.client.HTTPConnection('127.0.0.1', 2053, timeout=15)
+                    conn.request('GET', '/panel/api' + ep, headers={
+                        'Authorization': 'Bearer ' + token,
+                        REFRESH_HEADER: '1',
+                    })
+                    resp = conn.getresponse()
+                    resp.read()
+                    conn.close()
+                except Exception:
                     try:
-                        conn = http.client.HTTPConnection('127.0.0.1', 2053, timeout=15)
-                        conn.request('GET', prefix + ep, headers={
-                            'Authorization': 'Bearer ' + token,
-                            REFRESH_HEADER: '1',
-                        })
-                        resp = conn.getresponse()
-                        resp.read()
                         conn.close()
                     except Exception:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
+                        pass
             time.sleep(WARM_INTERVAL)
 
     threading.Thread(target=_warm_loop, daemon=True).start()
