@@ -337,6 +337,7 @@ def add_or_update_rule(rule_dict: Dict[str, Any]) -> Dict[str, Any]:
 
         data = load_user_rules()
         rules = data.get('rules', [])
+        old_rules_backup = [dict(r) for r in rules]
         now_iso = datetime.now(timezone.utc).isoformat()
 
         rule_id = rule_dict['id']
@@ -378,7 +379,12 @@ def add_or_update_rule(rule_dict: Dict[str, Any]) -> Dict[str, Any]:
         save_user_rules_file(data)
 
         rec_res = reconcile()
-        return {'success': rec_res.get('success', False), 'rule': rule_entry, 'reconcile': rec_res}
+        if not rec_res.get('success'):
+            data['rules'] = old_rules_backup
+            save_user_rules_file(data)
+            return {'success': False, 'error': rec_res.get('error', 'Reconcile failed'), 'reconcile': rec_res}
+
+        return {'success': True, 'rule': rule_entry, 'reconcile': rec_res}
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
@@ -389,6 +395,7 @@ def delete_rule(rule_id: str) -> Dict[str, Any]:
     try:
         data = load_user_rules()
         rules = data.get('rules', [])
+        old_rules_backup = [dict(r) for r in rules]
         found_idx = next((i for i, r in enumerate(rules) if r.get('id') == rule_id), -1)
         if found_idx < 0:
             return {'success': False, 'error': f"Rule ID '{rule_id}' not found"}
@@ -398,7 +405,12 @@ def delete_rule(rule_id: str) -> Dict[str, Any]:
         save_user_rules_file(data)
 
         rec_res = reconcile()
-        return {'success': rec_res.get('success', False), 'deleted': deleted, 'reconcile': rec_res}
+        if not rec_res.get('success'):
+            data['rules'] = old_rules_backup
+            save_user_rules_file(data)
+            return {'success': False, 'error': rec_res.get('error', 'Reconcile failed'), 'reconcile': rec_res}
+
+        return {'success': True, 'deleted': deleted, 'reconcile': rec_res}
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()

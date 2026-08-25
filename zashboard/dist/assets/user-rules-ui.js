@@ -82,6 +82,37 @@
     viewMode: 'list', // 'list' | 'add'
   };
 
+  function showToast(message, type = 'info') {
+    let toast = document.getElementById('user-rules-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'user-rules-toast';
+      toast.style.cssText = `
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 100000;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        pointer-events: none;
+      `;
+      document.body.appendChild(toast);
+    }
+    const item = document.createElement('div');
+    const isSuccess = type === 'success';
+    const isError = type === 'error';
+    item.className = `alert alert-sm ${isSuccess ? 'alert-success' : isError ? 'alert-error' : 'alert-info'} shadow-lg text-xs py-2 px-3 flex items-center gap-2 pointer-events-auto rounded-lg`;
+    item.style.animation = 'urModalFadeIn 0.2s ease-out';
+    item.innerHTML = `<span>${escapeHtml(message)}</span>`;
+    toast.appendChild(item);
+    setTimeout(() => {
+      item.style.opacity = '0';
+      item.style.transition = 'opacity 0.3s ease';
+      setTimeout(() => item.remove(), 300);
+    }, 3000);
+  }
+
   function getPanelAuthToken() {
     try {
       const activeUuid = localStorage.getItem('setup/active-uuid');
@@ -126,18 +157,24 @@
         method: 'DELETE',
         headers,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert('删除失败: ' + (err.error || res.statusText));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        const errMsg = data.error || (data.reconcile && data.reconcile.error) || res.statusText || '删除失败';
+        alert('删除失败: ' + errMsg);
         return;
       }
+      showToast('🗑️ 规则已删除并热重载生效！', 'success');
       await fetchUserRules();
     } catch (e) {
       alert('请求错误: ' + e.message);
     }
   }
 
-  async function saveUserRule(ruleData) {
+  async function saveUserRule(ruleData, submitBtn) {
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = '保存并生效中...';
+    }
     try {
       const token = getPanelAuthToken();
       const headers = { 'Content-Type': 'application/json' };
@@ -147,17 +184,24 @@
         headers,
         body: JSON.stringify(ruleData),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
-        alert('保存失败: ' + (data.error || res.statusText));
+        const errMsg = data.error || (data.reconcile && data.reconcile.error) || res.statusText || '保存失败';
+        alert('保存失败: ' + errMsg);
         return false;
       }
+      showToast('✅ 规则保存成功并已热重载生效！', 'success');
       userRulesState.viewMode = 'list';
       await fetchUserRules();
       return true;
     } catch (e) {
       alert('请求错误: ' + e.message);
       return false;
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '保存并生效';
+      }
     }
   }
 
@@ -257,7 +301,7 @@
         userRulesState.showModal = false;
         renderModal();
       };
-      modalEl.querySelector('#btn-submit-add').onclick = async () => {
+      modalEl.querySelector('#btn-submit-add').onclick = async (e) => {
         const payload = payloadEl.value.trim();
         if (!payload) {
           alert('请输入匹配目标 (Payload)');
@@ -268,7 +312,7 @@
           payload: payload,
           target: targetEl.value,
           enabled: true,
-        });
+        }, e.target);
       };
       return;
     }
