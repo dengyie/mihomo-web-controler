@@ -41,9 +41,14 @@ jobs:
       - name: Syntax & Lint check Python files
         run: |
           echo "Checking Python syntax and basic errors..."
-          pyflakes clash/rules-reconciler.py clash/apply-local-import.py zashboard/gateway.py
-          python3 -m py_compile clash/rules-reconciler.py clash/apply-local-import.py zashboard/gateway.py
+          pyflakes clash/rules-reconciler.py clash/apply-local-import.py zashboard/gateway.py tests/test_cache.py
+          python3 -m py_compile clash/rules-reconciler.py clash/apply-local-import.py zashboard/gateway.py tests/test_cache.py
           echo "All Python scripts passed syntax validation."
+
+      - name: Run Python unit tests
+        run: |
+          python3 -m unittest discover -s tests -v
+          echo "All unit tests passed."
 
       - name: Validate JSON & Web Assets
         run: |

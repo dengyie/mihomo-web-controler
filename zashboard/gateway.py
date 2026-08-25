@@ -105,6 +105,7 @@ STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
 CACHE_LOCK = threading.Lock()
 CACHE = {}
 CACHE_MAX_BYTES = 20 * 1024 * 1024
+CACHE_MAX_ENTRIES = 512
 REFRESH_HEADER = 'X-Zashboard-Refresh'
 
 
@@ -144,6 +145,20 @@ def cache_put(node: str, method: str, api_p: str, query: str, status: int, heade
         return
     key = (node, method, api_p, query)
     with CACHE_LOCK:
+        existing = CACHE.get(key)
+        # Preserve content-encoding if the upstream response was compressed;
+        # serve with the same header so cached bytes decode identically to the
+        # live path. (we also force identity upstream, but stay correct anyway)
+        if existing is not None:
+            CACHE[key] = {**existing, 'ts': time.time(), 'status': status, 'headers': headers, 'body': body}
+            return
+        if len(CACHE) >= CACHE_MAX_ENTRIES:
+            # evict the oldest entry by ts to bound memory on long-running hosts
+            try:
+                oldest_key = min(CACHE, key=lambda k: CACHE[k]['ts'])
+                CACHE.pop(oldest_key, None)
+            except ValueError:
+                CACHE.clear()
         CACHE[key] = {'ts': time.time(), 'status': status, 'headers': headers, 'body': body}
 
 
@@ -337,6 +352,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=30)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection', 'content-length')}
+        # Never request a compressed body from upstream: we may cache it and
+        # replay it without re-fetching, and the cache only preserves a fixed
+        # header subset. Forcing identity keeps cached bytes self-describing.
+        headers.pop('Accept-Encoding', None)
+        headers['Accept-Encoding'] = 'identity'
         headers['Host'] = '127.0.0.1:9090'
         controller_secret = ''
         secret_file = Path('/personal/clash/.controller-secret')
@@ -351,7 +371,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = resp.read()
             if method == 'GET' and resp.status == 200 and target not in STREAM_ENDPOINTS and not suffix.endswith(('/delay', '/healthcheck')):
                 saved_headers = [(k, v) for k, v in resp.getheaders()
-                                 if k.lower() in ('content-type', 'vary')]
+                                 if k.lower() in ('content-type', 'content-encoding', 'vary')]
                 cache_put('local', method, api_path(rel_path), query, resp.status, saved_headers, data)
             self.send_response(resp.status)
             for k, v in resp.getheaders():
@@ -441,6 +461,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         conn = http.client.HTTPConnection(remote_ip, remote_port, timeout=30)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection', 'content-length')}
+        headers.pop('Accept-Encoding', None)
+        headers['Accept-Encoding'] = 'identity'
         headers['Host'] = f'{remote_ip}:{remote_port}'
         if 'Authorization' not in headers:
             headers['Authorization'] = 'Bearer ' + panel_password()
@@ -452,7 +474,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = resp.read()
             if method == 'GET' and resp.status == 200 and not rel_path.endswith(('/delay', '/healthcheck')):
                 saved_headers = [(k, v) for k, v in resp.getheaders()
-                                 if k.lower() in ('content-type', 'vary')]
+                                 if k.lower() in ('content-type', 'content-encoding', 'vary')]
                 cache_put(node, method, api_path(rel_path), query, resp.status, saved_headers, data)
             self.send_response(resp.status)
             for k, v in resp.getheaders():
