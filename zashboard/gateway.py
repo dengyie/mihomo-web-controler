@@ -104,8 +104,14 @@ STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
 # ---------------------------------------------------------------------------
 CACHE_LOCK = threading.Lock()
 CACHE = {}
+CACHE_FAILS = {}              # node -> consecutive upstream failures
 CACHE_MAX_BYTES = 20 * 1024 * 1024
 CACHE_MAX_ENTRIES = 512
+# If a backend's upstream read fails this many consecutive times, STOP serving
+# stale data for it so a genuinely-dead backend surfaces real errors instead of
+# being masked forever by stale-while-revalidate. A single successful refetch
+# resets the counter (see cache_put).
+CACHE_MAX_CONSECUTIVE_FAILS = 5
 REFRESH_HEADER = 'X-Zashboard-Refresh'
 
 
@@ -128,14 +134,21 @@ def cache_get(node: str, method: str, api_p: str, query: str):
         return None
     key = (node, method, api_p, query)
     with CACHE_LOCK:
+        # Consecutive-failure guard: if this node just kept failing to reach the
+        # upstream, bypass stale so a real outage is reported (and auto-recovers
+        # once a refetch succeeds, which clears CACHE_FAILS).
+        if CACHE_FAILS.get(node, 0) >= CACHE_MAX_CONSECUTIVE_FAILS:
+            return None
         ent = CACHE.get(key)
         if not ent:
             return None
-        # stale-while-revalidate: serve whatever we have; the background
-        # warmer refreshes it within the interval. TTL is no longer a hard
-        # eviction door so a transient upstream hiccup never snowballs into
-        # a 10s+ cold <= frontend health check timing out.
         return ent
+
+
+def cache_fail(node: str):
+    """Record one consecutive upstream failure for a node."""
+    with CACHE_LOCK:
+        CACHE_FAILS[node] = CACHE_FAILS.get(node, 0) + 1
 
 
 def cache_put(node: str, method: str, api_p: str, query: str, status: int, headers, body: bytes):
@@ -145,6 +158,8 @@ def cache_put(node: str, method: str, api_p: str, query: str, status: int, heade
         return
     key = (node, method, api_p, query)
     with CACHE_LOCK:
+        # a successful refetch proves the upstream is reachable again
+        CACHE_FAILS.pop(node, None)
         existing = CACHE.get(key)
         # Preserve content-encoding if the upstream response was compressed;
         # serve with the same header so cached bytes decode identically to the
@@ -166,6 +181,7 @@ def cache_invalidate(node: str):
     with CACHE_LOCK:
         for k in [k for k in CACHE if k[0] == node]:
             CACHE.pop(k, None)
+        CACHE_FAILS.pop(node, None)
 
 
 def cache_stats():
@@ -381,6 +397,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
+            cache_fail('local')
             self.send_error(502, str(e))
         finally:
             conn.close()
@@ -484,6 +501,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
+            cache_fail(node)
             self.send_error(502, f"Remote gateway error ({remote_ip}:{remote_port}): {e}")
         finally:
             conn.close()

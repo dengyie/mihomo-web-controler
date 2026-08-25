@@ -98,6 +98,41 @@ class CacheIsolationTest(unittest.TestCase):
         gw.cache_put('local', 'GET', '/big', '', 200, [], big)
         self.assertIsNone(gw.cache_get('local', 'GET', '/big', ''))
 
+    def test_second_write_overwrites_body_and_headers(self):
+        """A re-fetch of an existing key must fully replace the cached body and
+        headers, not merge leftovers (guards the {**existing, ...} branch)."""
+        gw = self.gw
+        gw.cache_put('local', 'GET', '/proxies', '', 200,
+                     [('content-type', 'application/json'), ('content-encoding', 'br')],
+                     b'old-json')
+        # second refetch returns identity and a fresh body; headers shrink
+        gw.cache_put('local', 'GET', '/proxies', '', 200,
+                     [('content-type', 'application/json')],
+                     b'fresh-json')
+        ent = gw.cache_get('local', 'GET', '/proxies', '')
+        self.assertEqual(ent['body'], b'fresh-json', 'body must be the fresh one')
+        header_keys = [k for k, _ in ent['headers']]
+        self.assertNotIn('content-encoding', header_keys,
+                         'content-encoding must not survive an identity refresh')
+
+    def test_consecutive_failure_bypasses_stale(self):
+        """Once a node fails enough consecutive upstream reads, cached (stale)
+        data must NOT be served -- surfacing the real outage. A successful
+        cache_put resets the counter so the node recovers automatically."""
+        gw = self.gw
+        gw.cache_put('local', 'GET', '/version', '', 200, [], b'{"v":"1"}')
+        # 5 failures reaches the threshold
+        for _ in range(gw.CACHE_MAX_CONSECUTIVE_FAILS):
+            gw.cache_fail('local')
+        self.assertIsNone(gw.cache_get('local', 'GET', '/version', ''),
+                          'stale must be bypassed after sustained failures')
+        # a successful refetch clears the counter and stale is served again
+        gw.cache_put('local', 'GET', '/version', '', 200, [], b'{"v":"1"}')
+        self.assertIsNotNone(gw.cache_get('local', 'GET', '/version', ''),
+                             'counter should reset on success')
+        # another node is unaffected
+        self.assertIsNone(gw.cache_get('pxed', 'GET', '/version', ''))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
