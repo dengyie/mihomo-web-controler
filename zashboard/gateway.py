@@ -138,6 +138,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200 if res.get('success') else 400, res)
             return
 
+        if method == 'PATCH':
+            if not subpath:
+                self.send_json(400, {'error': 'Missing rule ID in path'})
+                return
+            rule_id = subpath
+            if not isinstance(payload, dict):
+                self.send_json(400, {'error': 'Payload must be a JSON object'})
+                return
+            data = reconciler.load_user_rules()
+            rules = data.get('rules', [])
+            target_rule = next((r for r in rules if r.get('id') == rule_id), None)
+            if not target_rule:
+                self.send_json(404, {'error': f"Rule ID '{rule_id}' not found"})
+                return
+            target_rule.update(payload)
+            target_rule['id'] = rule_id
+            res = reconciler.add_or_update_rule(target_rule)
+            self.send_json(200 if res.get('success') else 400, res)
+            return
+
         if method == 'DELETE':
             if not subpath:
                 self.send_json(400, {'error': 'Missing rule ID in path'})
@@ -275,6 +295,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.split('?', 1)[0].startswith('/panel/api/'):
             return self._proxy('PUT')
         self.send_error(404)
+
+    def do_PATCH(self):
+        if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
+            return self._handle_user_rules('PATCH')
+        if self.path.split('?', 1)[0].startswith('/panel/api/'):
+            return self._proxy('PATCH')
+        self.send_error(404)
+
+    def do_OPTIONS(self):
+        if self.path.split('?', 1)[0].startswith('/panel/api/'):
+            return self._proxy('OPTIONS')
+        self.send_response(204)
+        self.end_headers()
 
     def do_DELETE(self):
         if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
