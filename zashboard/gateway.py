@@ -94,15 +94,16 @@ def panel_password():
 STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
 
 # ---------------------------------------------------------------------------
-# In-memory TTL cache for idempotent / re-readable GET endpoints.
+# In-memory (stale-while-revalidate) cache for idempotent / re-readable GETs.
 # Key = (node, method, api_path, query); nodes are 'local' (this host's own
 # mihomo) and 'pxed'/'tebi' (remote node reached over the VPC). caches are
-# per-node isolated so we never mix two backends' data.
+# per-node isolated so we never mix two backends' data. We serve whatever we
+# have (even stale) so a transient upstream (pxed VPC) hiccup never snowballs
+# into a 10s+ cold <= frontend /version health check timing out; the background
+# warmer refreshes every ~10s and mutation invalidation clears on change.
 # ---------------------------------------------------------------------------
 CACHE_LOCK = threading.Lock()
 CACHE = {}
-CACHE_TTL_DEFAULT = 3
-CACHE_TTL = {'/version': 30, '/configs': 5, '/rules': 5}
 CACHE_MAX_BYTES = 20 * 1024 * 1024
 REFRESH_HEADER = 'X-Zashboard-Refresh'
 
@@ -121,10 +122,6 @@ def _is_cacheable(method: str, api_p: str) -> bool:
     return True
 
 
-def _cache_ttl(api_p: str) -> float:
-    return CACHE_TTL.get(api_p, CACHE_TTL_DEFAULT)
-
-
 def cache_get(node: str, method: str, api_p: str, query: str):
     if not _is_cacheable(method, api_p):
         return None
@@ -133,9 +130,10 @@ def cache_get(node: str, method: str, api_p: str, query: str):
         ent = CACHE.get(key)
         if not ent:
             return None
-        if time.time() - ent['ts'] > _cache_ttl(api_p):
-            CACHE.pop(key, None)
-            return None
+        # stale-while-revalidate: serve whatever we have; the background
+        # warmer refreshes it within the interval. TTL is no longer a hard
+        # eviction door so a transient upstream hiccup never snowballs into
+        # a 10s+ cold <= frontend health check timing out.
         return ent
 
 
