@@ -370,10 +370,11 @@ def add_or_update_rule(rule_dict: Dict[str, Any]) -> Dict[str, Any]:
 
         if found_idx >= 0:
             rule_entry['createdAt'] = rules[found_idx].get('createdAt', now_iso)
-            rules[found_idx] = rule_entry
+            rules.pop(found_idx)
+            rules.insert(0, rule_entry)
         else:
             rule_entry['createdAt'] = now_iso
-            rules.append(rule_entry)
+            rules.insert(0, rule_entry)
 
         data['rules'] = rules
         save_user_rules_file(data)
