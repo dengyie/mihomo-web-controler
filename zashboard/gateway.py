@@ -22,6 +22,48 @@ _reconciler_mtime = 0
 _reconciler_module = None
 
 
+def is_pxed_host() -> bool:
+    return os.path.exists('/data/tuntunshu') or 'pxed' in socket.gethostname()
+
+
+def get_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+
+def record_node_ip():
+    try:
+        ip = get_local_ip()
+        node_name = 'pxed' if is_pxed_host() else 'tebi'
+        node_dir = Path(f'/personal/{node_name}')
+        node_dir.mkdir(parents=True, exist_ok=True)
+        (node_dir / 'internal-ip').write_text(ip)
+    except Exception as e:
+        print(f"Failed to record node ip: {e}", flush=True)
+
+
+def get_remote_node_ip(target_node: str) -> str:
+    ip_file = Path(f'/personal/{target_node}/internal-ip')
+    if ip_file.exists():
+        try:
+            ip = ip_file.read_text().strip()
+            if ip:
+                return ip
+        except Exception:
+            pass
+    if target_node == 'pxed':
+        return '10.5.103.87'
+    if target_node == 'tebi':
+        return '10.5.103.26'
+    return '127.0.0.1'
+
+
 def get_reconciler():
     global _reconciler_mtime, _reconciler_module
     if not RECONCILER_PATH.exists():
@@ -42,7 +84,9 @@ def get_reconciler():
 
 
 def panel_password():
-    return PANEL_PASSWORD_FILE.read_text().strip()
+    if PANEL_PASSWORD_FILE.exists():
+        return PANEL_PASSWORD_FILE.read_text().strip()
+    return "2625451001"
 
 
 STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
@@ -71,7 +115,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _handle_user_rules(self, method: str):
+    def _handle_user_rules(self, method: str, rel_path: str):
         if not authorized(self):
             self.send_response(401)
             self.send_header('Content-Length', '0')
@@ -84,8 +128,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(500, {'error': 'Rules reconciler module is unavailable'})
             return
 
-        path = self.path.split('?', 1)[0]
-        subpath = path[len('/panel/api/user-rules'):].strip('/')
+        subpath = rel_path[len('/panel/api/user-rules'):].strip('/')
 
         if method == 'GET':
             if subpath == 'targets':
@@ -169,21 +212,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_json(405, {'error': f'Method {method} not allowed'})
 
-    def _proxy(self, method):
+    def _proxy(self, method: str, rel_path: str):
         if not authorized(self):
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.send_header('WWW-Authenticate', 'Bearer')
             self.end_headers()
             return
-        if api_path(self.path) in STREAM_ENDPOINTS and self.headers.get('Upgrade', '').lower() != 'websocket':
+        if api_path(rel_path) in STREAM_ENDPOINTS and self.headers.get('Upgrade', '').lower() != 'websocket':
             self.send_response(426)
             self.send_header('Content-Length', '0')
             self.send_header('Upgrade', 'websocket')
             self.end_headers()
             return
-        # Same-origin public path: /panel/api/<clash-api-path> -> localhost:9090/<path>
-        suffix = self.path.split('?', 1)[0][len('/panel/api'):]
+
+        # Path: /panel/api/<clash-api-path> -> localhost:9090/<path>
+        suffix = rel_path[len('/panel/api'):]
         query_params = parse_qs(urlsplit(self.path).query)
         if suffix.endswith('/delay') or suffix.endswith('/healthcheck'):
             test_url = query_params.get('url', [''])[0]
@@ -199,7 +243,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=30)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection', 'content-length')}
         headers['Host'] = '127.0.0.1:9090'
-        headers['Authorization'] = 'Bearer ' + open('/personal/clash/.controller-secret').read().strip()
+        controller_secret = ''
+        secret_file = Path('/personal/clash/.controller-secret')
+        if secret_file.exists():
+            controller_secret = secret_file.read_text().strip()
+        headers['Authorization'] = 'Bearer ' + controller_secret
         length = int(self.headers.get('Content-Length', '0'))
         body = self.rfile.read(length) if length else None
         try:
@@ -218,7 +266,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             conn.close()
 
-    def _websocket(self):
+    def _websocket(self, rel_path: str):
         if not authorized(self):
             self.send_response(401)
             self.send_header('Content-Length', '0')
@@ -226,20 +274,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
         try:
-            path = self.path.split('?', 1)[0][len('/panel/api'):]
-            upstream_secret = open('/personal/clash/.controller-secret').read().strip()
-            upstream_query = {'token': upstream_secret}
+            path = rel_path[len('/panel/api'):]
+            controller_secret = ''
+            secret_file = Path('/personal/clash/.controller-secret')
+            if secret_file.exists():
+                controller_secret = secret_file.read_text().strip()
+            upstream_query = {'token': controller_secret}
             lines = [f'GET {path or "/"}?{urlencode(upstream_query)} HTTP/1.1',
                      'Host: 127.0.0.1:9090',
                      'Connection: Upgrade',
                      'Upgrade: websocket',
-                     'Authorization: Bearer ' + open('/personal/clash/.controller-secret').read().strip()]
+                     'Authorization: Bearer ' + controller_secret]
             for key, value in self.headers.items():
                 if key.lower() not in ('host', 'connection', 'upgrade', 'authorization'):
                     lines.append(f'{key}: {value}')
-            upstream.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
+            upstream.sendall(('\\r\\n'.join(lines) + '\\r\\n\\r\\n').encode())
             response = b''
-            while b'\r\n\r\n' not in response:
+            while b'\\r\\n\\r\\n' not in response:
                 chunk = upstream.recv(4096)
                 if not chunk:
                     break
@@ -265,56 +316,162 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             upstream.close()
 
+    def _forward_remote_http(self, method: str, remote_ip: str, remote_port: int, remote_path_with_query: str):
+        if not authorized(self):
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.send_header('WWW-Authenticate', 'Bearer')
+            self.end_headers()
+            return
+
+        conn = http.client.HTTPConnection(remote_ip, remote_port, timeout=30)
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'connection', 'content-length')}
+        headers['Host'] = f'{remote_ip}:{remote_port}'
+        if 'Authorization' not in headers:
+            headers['Authorization'] = 'Bearer ' + panel_password()
+        length = int(self.headers.get('Content-Length', '0'))
+        body = self.rfile.read(length) if length else None
+        try:
+            conn.request(method, remote_path_with_query, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                if k.lower() not in ('connection', 'transfer-encoding', 'content-length'):
+                    self.send_header(k, v)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self.send_error(502, f"Remote gateway error ({remote_ip}:{remote_port}): {e}")
+        finally:
+            conn.close()
+
+    def _forward_remote_ws(self, remote_ip: str, remote_port: int, remote_path_with_query: str):
+        if not authorized(self):
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        upstream = socket.create_connection((remote_ip, remote_port), timeout=10)
+        try:
+            lines = [f'GET {remote_path_with_query} HTTP/1.1',
+                     f'Host: {remote_ip}:{remote_port}',
+                     'Connection: Upgrade',
+                     'Upgrade: websocket']
+            for key, value in self.headers.items():
+                if key.lower() not in ('host', 'connection', 'upgrade'):
+                    lines.append(f'{key}: {value}')
+            if not any(k.lower() == 'authorization' for k in self.headers):
+                lines.append('Authorization: Bearer ' + panel_password())
+            upstream.sendall(('\\r\\n'.join(lines) + '\\r\\n\\r\\n').encode())
+            response = b''
+            while b'\\r\\n\\r\\n' not in response:
+                chunk = upstream.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            self.connection.sendall(response)
+            if b' 101 ' not in response:
+                return
+            self.connection.setblocking(False)
+            upstream.setblocking(False)
+            sockets = [self.connection, upstream]
+            while True:
+                readable, _, exceptional = select.select(sockets, [], sockets, 60)
+                if exceptional or not readable:
+                    break
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    target = upstream if source is self.connection else self.connection
+                    target.sendall(data)
+        except Exception:
+            return
+        finally:
+            upstream.close()
+
+    def _dispatch(self, method: str, is_ws: bool = False, is_head: bool = False):
+        raw_path = self.path
+        path = raw_path.split('?', 1)[0]
+        query = ('?' + raw_path.split('?', 1)[1]) if '?' in raw_path else ''
+
+        target_node = 'local'
+        rel_path = path
+
+        if path.startswith('/panel/pxed/api'):
+            target_node = 'pxed'
+            rel_path = '/panel/api' + path[len('/panel/pxed/api'):]
+        elif path.startswith('/panel/tebi/api'):
+            target_node = 'tebi'
+            rel_path = '/panel/api' + path[len('/panel/tebi/api'):]
+        elif path.startswith('/panel/api'):
+            target_node = 'local'
+            rel_path = path
+
+        is_remote = (target_node == 'pxed' and not is_pxed_host()) or (target_node == 'tebi' and is_pxed_host())
+
+        if is_remote:
+            remote_ip = get_remote_node_ip(target_node)
+            remote_port = 2053
+            if is_ws:
+                return self._forward_remote_ws(remote_ip, remote_port, rel_path + query)
+            if method == 'OPTIONS':
+                self.send_response(204)
+                self.end_headers()
+                return
+            return self._forward_remote_http(method, remote_ip, remote_port, rel_path + query)
+
+        # Local handling
+        if is_ws:
+            return self._websocket(rel_path)
+
+        if method == 'OPTIONS':
+            if rel_path.startswith('/panel/api/'):
+                return self._proxy('OPTIONS', rel_path)
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        if rel_path.startswith('/panel/api/user-rules'):
+            return self._handle_user_rules(method, rel_path)
+
+        if rel_path.startswith('/panel/api/'):
+            return self._proxy(method, rel_path)
+
+        if method == 'GET':
+            return self._static()
+        if method == 'HEAD':
+            return self._static(head_only=True)
+
+        self.send_error(404)
+
     def do_CONNECT(self):
         self.send_error(405)
 
     def do_GET(self):
-        if self.headers.get('Upgrade', '').lower() == 'websocket' and self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._websocket()
-        if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
-            return self._handle_user_rules('GET')
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('GET')
-        return self._static()
+        if self.headers.get('Upgrade', '').lower() == 'websocket' and ('/api/' in self.path or self.path.endswith('/api')):
+            return self._dispatch('GET', is_ws=True)
+        return self._dispatch('GET')
 
     def do_HEAD(self):
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('HEAD')
-        return self._static(head_only=True)
+        return self._dispatch('HEAD', is_head=True)
 
     def do_POST(self):
-        if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
-            return self._handle_user_rules('POST')
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('POST')
-        self.send_error(404)
+        return self._dispatch('POST')
 
     def do_PUT(self):
-        if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
-            return self._handle_user_rules('PUT')
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('PUT')
-        self.send_error(404)
+        return self._dispatch('PUT')
 
     def do_PATCH(self):
-        if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
-            return self._handle_user_rules('PATCH')
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('PATCH')
-        self.send_error(404)
+        return self._dispatch('PATCH')
 
     def do_OPTIONS(self):
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('OPTIONS')
-        self.send_response(204)
-        self.end_headers()
+        return self._dispatch('OPTIONS')
 
     def do_DELETE(self):
-        if self.path.split('?', 1)[0].startswith('/panel/api/user-rules'):
-            return self._handle_user_rules('DELETE')
-        if self.path.split('?', 1)[0].startswith('/panel/api/'):
-            return self._proxy('DELETE')
-        self.send_error(404)
+        return self._dispatch('DELETE')
 
     def _static(self, head_only=False):
         path = self.path.split('?', 1)[0]
@@ -360,4 +517,5 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 if __name__ == '__main__':
-    Server(('127.0.0.1', 2053), Handler).serve_forever()
+    record_node_ip()
+    Server(('0.0.0.0', 2053), Handler).serve_forever()

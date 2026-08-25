@@ -80,6 +80,7 @@
     loading: false,
     showModal: false,
     viewMode: 'list', // 'list' | 'add'
+    lastActiveUuid: '',
   };
 
   function showToast(message, type = 'info') {
@@ -97,8 +98,7 @@
         gap: 8px;
         pointer-events: none;
       `;
-      document.body.appendChild(toast);
-    }
+      document.body.appendChild(toast);\n    }
     const item = document.createElement('div');
     const isSuccess = type === 'success';
     const isError = type === 'error';
@@ -109,19 +109,37 @@
     setTimeout(() => {
       item.style.opacity = '0';
       item.style.transition = 'opacity 0.3s ease';
-      setTimeout(() => item.remove(), 300);
-    }, 3000);
+      setTimeout(() => item.remove(), 300);\n    }, 3000);
   }
 
-  function getPanelAuthToken() {
+  function getActiveBackend() {
     try {
       const activeUuid = localStorage.getItem('setup/active-uuid');
       const list = JSON.parse(localStorage.getItem('setup/api-list') || '[]');
-      const active = list.find((x) => x.uuid === activeUuid) || list[0];
-      return active?.password || '';
+      return list.find((x) => x.uuid === activeUuid) || list[0] || null;
     } catch (_) {
-      return '';
+      return null;
     }
+  }
+
+  function getPanelApiBase() {
+    const active = getActiveBackend();
+    if (active && active.secondaryPath) {
+      let sp = active.secondaryPath.trim().replace(/\/+$/, '');
+      if (sp && !sp.startsWith('/')) sp = '/' + sp;
+      return sp + '/user-rules';
+    }
+    return '/panel/api/user-rules';
+  }
+
+  function getPanelAuthToken() {
+    const active = getActiveBackend();
+    return active?.password || '2625451001';
+  }
+
+  function getActiveBackendLabel() {
+    const active = getActiveBackend();
+    return active?.label || 'node';
   }
 
   async function fetchUserRules() {
@@ -130,7 +148,8 @@
       const token = getPanelAuthToken();
       const headers = {};
       if (token) headers['Authorization'] = 'Bearer ' + token;
-      const res = await fetch('/panel/api/user-rules', { headers });
+      const apiEndpoint = getPanelApiBase();
+      const res = await fetch(apiEndpoint, { headers });
       if (!res.ok) throw new Error('Status ' + res.status);
       const data = await res.json();
       userRulesState.rules = data.rules || [];
@@ -153,7 +172,8 @@
       const token = getPanelAuthToken();
       const headers = {};
       if (token) headers['Authorization'] = 'Bearer ' + token;
-      const res = await fetch('/panel/api/user-rules/' + encodeURIComponent(ruleId), {
+      const apiEndpoint = getPanelApiBase() + '/' + encodeURIComponent(ruleId);
+      const res = await fetch(apiEndpoint, {
         method: 'DELETE',
         headers,
       });
@@ -179,7 +199,8 @@
       const token = getPanelAuthToken();
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = 'Bearer ' + token;
-      const res = await fetch('/panel/api/user-rules', {
+      const apiEndpoint = getPanelApiBase();
+      const res = await fetch(apiEndpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify(ruleData),
@@ -219,6 +240,8 @@
       document.body.appendChild(modalEl);
     }
 
+    const currentLabel = getActiveBackendLabel();
+
     if (userRulesState.viewMode === 'add') {
       const ruleTypes = [
         'DOMAIN-SUFFIX',
@@ -240,7 +263,7 @@
               <button class="btn btn-ghost btn-sm btn-circle" id="btn-back-to-list">
                 <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
               </button>
-              <h3 class="font-bold text-sm">新增自定义规则</h3>
+              <h3 class="font-bold text-sm">新增自定义规则 <span class="badge badge-sm badge-outline text-[10px] ml-1 font-mono">${escapeHtml(currentLabel)}</span></h3>
             </div>
             <button class="btn btn-ghost btn-sm btn-circle" id="btn-close-modal">✕</button>
           </div>
@@ -343,7 +366,7 @@
             <svg class="h-4 w-4 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
             </svg>
-            <h3 class="font-bold text-sm">自定义规则管理</h3>
+            <h3 class="font-bold text-sm">自定义规则管理 <span class="badge badge-sm badge-outline text-[10px] ml-1 font-mono">${escapeHtml(currentLabel)}</span></h3>
             <span class="badge badge-sm badge-neutral text-[11px]">${userRulesState.rules.length}</span>
           </div>
           <div class="flex items-center gap-1.5">
@@ -409,8 +432,19 @@
     return btn;
   }
 
-  // 精确注入：定位"规则设置"齿轮按钮 (btn-circle btn-sm，排除搜索框内的 btn-circle btn-xs 清除按钮)
+  function checkBackendChange() {
+    const currentActiveUuid = localStorage.getItem('setup/active-uuid') || '';
+    if (userRulesState.lastActiveUuid && userRulesState.lastActiveUuid !== currentActiveUuid) {
+      userRulesState.lastActiveUuid = currentActiveUuid;
+      fetchUserRules();
+    } else {
+      userRulesState.lastActiveUuid = currentActiveUuid;
+    }
+  }
+
+  // 精确注入：定位"规则设置"齿轮按钮
   function injectRulesButton() {
+    checkBackendChange();
     const isRulesPage = location.hash.startsWith('#/rules');
     let existingBtn = document.getElementById('user-rules-top-action-btn');
 
@@ -423,7 +457,6 @@
       return;
     }
 
-    // 找到搜索框 input
     const inputs = Array.from(document.querySelectorAll('input'));
     const searchInput = inputs.find(i => {
       const ph = i.getAttribute('placeholder') || '';
@@ -432,7 +465,6 @@
 
     if (!searchInput) return;
 
-    // 从搜索框向上遍历，找到工具栏 row（其直接子元素里含有 btn-circle btn-sm 齿轮按钮）
     let row = searchInput.parentElement;
     while (row && row !== document.body && row !== document.documentElement) {
       const directBtns = Array.from(row.children).filter(ch => {
@@ -442,7 +474,6 @@
       });
 
       if (directBtns.length > 0) {
-        // 规则设置按钮是工具栏最右侧的 btn-sm 齿轮
         const gearBtn = directBtns[directBtns.length - 1];
         gearBtn.insertAdjacentElement('beforebegin', createRulesButton());
         return;
@@ -451,7 +482,6 @@
     }
   }
 
-  // MutationObserver 实时挂载 + 轮询兜底
   const observer = new MutationObserver(() => {
     injectRulesButton();
   });

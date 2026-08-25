@@ -51,6 +51,56 @@ if ('caches' in window) {
   caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))).catch(() => {})
 }
 </script>
+<script>
+// Auto-seed tebi and pxed dual backends if not present.
+try {
+  const apiKey = 'setup/api-list'
+  const activeKey = 'setup/active-uuid'
+  let list = JSON.parse(localStorage.getItem(apiKey) || '[]')
+  if (!Array.isArray(list)) list = []
+
+  const tebiUuid = 'backend-tebi-default'
+  const pxedUuid = 'backend-pxed-default'
+
+  let hasTebi = list.some((x) => x && (x.label === 'tebi' || x.secondaryPath === '/panel/api' || x.secondaryPath === '/panel/tebi/api'))
+  let hasPxed = list.some((x) => x && (x.label === 'pxed' || x.secondaryPath === '/panel/pxed/api'))
+
+  if (!hasTebi) {
+    list.unshift({
+      type: 'clash',
+      protocol: 'https',
+      host: '3x-ui.mangoqwq.com',
+      port: '443',
+      secondaryPath: '/panel/api',
+      password: '2625451001',
+      uuid: tebiUuid,
+      label: 'tebi',
+      disableUpgradeCore: true,
+      disableTunMode: true,
+    })
+  }
+
+  if (!hasPxed) {
+    list.push({
+      type: 'clash',
+      protocol: 'https',
+      host: '3x-ui.mangoqwq.com',
+      port: '443',
+      secondaryPath: '/panel/pxed/api',
+      password: '2625451001',
+      uuid: pxedUuid,
+      label: 'pxed',
+      disableUpgradeCore: true,
+      disableTunMode: true,
+    })
+  }
+
+  localStorage.setItem(apiKey, JSON.stringify(list))
+  if (!localStorage.getItem(activeKey)) {
+    localStorage.setItem(activeKey, list[0].uuid)
+  }
+} catch (_) {}
+</script>
     <div id="app"></div>
     <script>
 // Panel-only latency defaults for Hutao-compatible independent checks.
@@ -88,6 +138,6 @@ try {
         setFavicon(media.matches)
       })()
     </script>
-  <script src="./assets/user-rules-ui.js?v=20260825-v2"></script>
+  <script src="./assets/user-rules-ui.js?v=20260825-v3"></script>
 </body>
 </html>
