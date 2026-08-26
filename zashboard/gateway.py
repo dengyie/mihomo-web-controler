@@ -385,10 +385,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             conn.request(method, target + query, body=body, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
-            if method == 'GET' and resp.status == 200 and target not in STREAM_ENDPOINTS and not suffix.endswith(('/delay', '/healthcheck')):
-                saved_headers = [(k, v) for k, v in resp.getheaders()
-                                 if k.lower() in ('content-type', 'content-encoding', 'vary')]
-                cache_put('local', method, api_path(rel_path), query, resp.status, saved_headers, data)
+            if method == 'GET' and target not in STREAM_ENDPOINTS and not suffix.endswith(('/delay', '/healthcheck')):
+                if resp.status == 200:
+                    saved_headers = [(k, v) for k, v in resp.getheaders()
+                                     if k.lower() in ('content-type', 'content-encoding', 'vary')]
+                    cache_put('local', method, api_path(rel_path), query, resp.status, saved_headers, data)
+                elif resp.status >= 500:
+                    # A reachable-but-5xx backend is still a backend failure:
+                    # count it so stale stops being served and the real error
+                    # surfaces, then auto-recovers on the next success.
+                    cache_fail('local')
         except Exception as e:
             # Only a failure to reach/read the UPSTREAM counts as a backend
             # failure. Writing to a disconnecting client must NOT do so.
@@ -497,10 +503,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             conn.request(method, remote_path_with_query, body=body, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
-            if method == 'GET' and resp.status == 200 and not rel_path.endswith(('/delay', '/healthcheck')):
-                saved_headers = [(k, v) for k, v in resp.getheaders()
-                                 if k.lower() in ('content-type', 'content-encoding', 'vary')]
-                cache_put(node, method, api_path(rel_path), query, resp.status, saved_headers, data)
+            if method == 'GET' and not rel_path.endswith(('/delay', '/healthcheck')):
+                if resp.status == 200:
+                    saved_headers = [(k, v) for k, v in resp.getheaders()
+                                     if k.lower() in ('content-type', 'content-encoding', 'vary')]
+                    cache_put(node, method, api_path(rel_path), query, resp.status, saved_headers, data)
+                elif resp.status >= 500:
+                    # Reachable-but-5xx upstream counts as a failure too, so
+                    # stale stops once the gate trips and recovers on next 200.
+                    cache_fail(node)
         except Exception as e:
             # Only a failure to reach/read the remote gateway counts as a
             # backend failure; a client that disconnects mid-write must not.

@@ -57,13 +57,15 @@ class _StaticBackend:
 class _HandlerHarness:
     """Drive a real Handler instance with fake upstream/client I/O."""
 
-    def __init__(self, gw, backend, wfile=None, auth=True):
+    def __init__(self, gw, backend, wfile=None, auth=True, refresh=False):
         from email.message import Message
         self.gateway = gw
         h = object.__new__(gw.Handler)
         headers = Message()
         headers['Authorization'] = 'Bearer ' + (gw.panel_password() if auth else 'wrong')
         headers['Accept-Encoding'] = 'gzip, deflate'
+        if refresh:
+            headers['X-Zashboard-Refresh'] = '1'
         h.headers = headers
         h.path = '/panel/api/version'
         h.command = 'GET'
@@ -206,6 +208,46 @@ class ClientDisconnectTests(CacheSharedTests):
         with gw.CACHE_LOCK:
             self.assertEqual(gw.CACHE_FAILS.get('local', 0), 1,
                              'upstream failure MUST increment per-node counter')
+
+
+class HttpStatusFailureTests(CacheSharedTests):
+    """A reachable-but-5xx upstream must also trip the consecutive-failure gate."""
+
+    def test_5xx_status_counts_as_failure(self):
+        gw = self.gw
+        # reachable backend returning 502 status (not a transport exception)
+        backend = _StaticBackend(status=502, body=b'service unavailable')
+        harness = _HandlerHarness(gw, backend)
+        harness.call_proxy()
+        with gw.CACHE_LOCK:
+            self.assertGreaterEqual(gw.CACHE_FAILS.get('local', 0), 1,
+                                    '5xx status MUST increment per-node failure')
+
+    def test_2xx_does_not_count_and_resets(self):
+        gw = self.gw
+        # Pre-load a failure so we can assert a 200 refetch resets the counter.
+        for _ in range(2):
+            gw.cache_fail('local')
+        backend = _StaticBackend(status=200, body=b'{"v":"1"}')
+        harness = _HandlerHarness(gw, backend)
+        harness.call_proxy()
+        with gw.CACHE_LOCK:
+            self.assertEqual(gw.CACHE_FAILS.get('local', 0), 0,
+                             'successful 200 must reset the failure counter')
+
+    def test_repeated_5xx_trips_gate(self):
+        gw = self.gw
+        gw.cache_put('local', 'GET', '/version', '', 200, [], b'{"v":"1"}')
+        # refresh forces the origin fetch (bypasses stale) so the 5xx branch
+        # runs; N-1 failures leave stale served
+        for _ in range(gw.CACHE_MAX_CONSECUTIVE_FAILS - 1):
+            backend = _StaticBackend(status=502, body=b'err')
+            _HandlerHarness(gw, backend, refresh=True).call_proxy()
+            self.assertIsNotNone(gw.cache_get('local', 'GET', '/version', ''))
+        # Nth failure trips the gate: stale bypassed, real error surfaces
+        backend = _StaticBackend(status=502, body=b'err')
+        _HandlerHarness(gw, backend, refresh=True).call_proxy()
+        self.assertIsNone(gw.cache_get('local', 'GET', '/version', ''))
 
 
 if __name__ == '__main__':
