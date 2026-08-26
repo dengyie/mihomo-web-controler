@@ -7,6 +7,7 @@ failure counter (only genuine upstream read failures should).
 """
 import importlib.util
 import io
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -248,6 +249,74 @@ class HttpStatusFailureTests(CacheSharedTests):
         backend = _StaticBackend(status=502, body=b'err')
         _HandlerHarness(gw, backend, refresh=True).call_proxy()
         self.assertIsNone(gw.cache_get('local', 'GET', '/version', ''))
+
+
+class RemoteRevalidateTests(CacheSharedTests):
+    """Lazy remote revalidation surfaces a dead remote instead of masking it."""
+
+    def test_fresh_entry_not_scheduled(self):
+        gw = self.gw
+        gw.cache_put('pxed', 'GET', '/version', '', 200, [], b'{"v":"old"}')
+        with gw.CACHE_LOCK:
+            gw.CACHE[('pxed', 'GET', '/version', '')]['ts'] = time.time() - 2
+        h = object.__new__(gw.Handler)
+        with mock.patch('threading.Thread', autospec=True) as th:
+            ok = h._schedule_remote_revalidate('pxed', '10.0.0.2', 2053,
+                                               '/panel/api/version', '', '/version')
+            self.assertFalse(ok)
+            th.assert_not_called()
+
+    def test_stale_entry_scheduled_and_deduped(self):
+        gw = self.gw
+        gw.cache_put('pxed', 'GET', '/version', '', 200, [], b'{"v":"old"}')
+        with gw.CACHE_LOCK:
+            gw.CACHE[('pxed', 'GET', '/version', '')]['ts'] = time.time() - 100
+        h = object.__new__(gw.Handler)          
+        with mock.patch('threading.Thread', autospec=True):
+            first = h._schedule_remote_revalidate('pxed', '10.0.0.2', 10000,
+                                                  '/panel/api/version', '', '/version')
+            # second call sees it in-flight -> not scheduled again
+            second = h._schedule_remote_revalidate('pxed', '10.0.0.2', 10000,
+                                                   '/panel/api/version', '', '/version')
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    def test_refetch_200_refreshes_and_resets_failure(self):
+        gw = self.gw
+        gw.cache_put('pxed', 'GET', '/version', '', 200, [], b'{"v":"old"}')
+        for _ in range(3):
+            gw.cache_fail('pxed')
+        backend = _StaticBackend(status=200, body=b'{"v":"new"}')
+        h = object.__new__(gw.Handler)
+        with mock.patch('http.client.HTTPConnection', return_value=backend):
+            h._remote_refetch('pxed', '10.0.0.2', 10000,
+                              '/panel/api/version', '/version', '')
+        ent = gw.cache_get('pxed', 'GET', '/version', '')
+        self.assertIsNotNone(ent)
+        self.assertEqual(ent['body'], b'{"v":"new"}')
+        self.assertEqual(gw.CACHE_FAILS.get('pxed', 0), 0)
+
+    def test_refetch_5xx_increments_failure(self):
+        gw = self.gw
+        gw.cache_put('pxed', 'GET', '/version', '', 200, [], b'{"v":"old"}')
+        backend = _StaticBackend(status=502, body=b'err')
+        h = object.__new__(gw.Handler)
+        with mock.patch('http.client.HTTPConnection', return_value=backend):
+            h._remote_refetch('pxed', '10.0.0.2', 10000,
+                              '/panel/api/version', '/version', '')
+        self.assertEqual(gw.CACHE_FAILS.get('pxed', 0), 1)
+        # one failure does NOT yet bypass stale
+        self.assertIsNotNone(gw.cache_get('pxed', 'GET', '/version', ''))
+
+    def test_refetch_transport_error_increments_failure(self):
+        gw = self.gw
+        gw.cache_put('pxed', 'GET', '/version', '', 200, [], b'{"v":"old"}')
+        backend = _StaticBackend(raise_on_request=OSError('down'))
+        h = object.__new__(gw.Handler)
+        with mock.patch('http.client.HTTPConnection', return_value=backend):
+            h._remote_refetch('pxed', '10.0.0.2', 10000,
+                              '/panel/api/version', '/version', '')
+        self.assertEqual(gw.CACHE_FAILS.get('pxed', 0), 1)
 
 
 if __name__ == '__main__':

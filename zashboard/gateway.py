@@ -113,6 +113,14 @@ CACHE_MAX_ENTRIES = 512
 # resets the counter (see cache_put).
 CACHE_MAX_CONSECUTIVE_FAILS = 5
 REFRESH_HEADER = 'X-Zashboard-Refresh'
+# Remote (px) nodes have no background warmer (its own host warms it). Without
+# a refetch there is no way for the 5xx/transfer-failure path to run, so a
+# genuinely dead remote would keep serving stale forever. We revalidate a
+# served-but-stale remote entry lazily (only when a client actually reads it)
+# in a background thread; the fetch mutates the cache + failure counter the
+# same way a live read would. Deduplicated so we never hammer the slow VPC.
+REMOTE_REVALIDATE_SECS = 15
+_REMOTE_REVALIDATING = set()   # keys in-flight, guarded by CACHE_LOCK
 
 
 def _is_cacheable(method: str, api_p: str) -> bool:
@@ -219,6 +227,72 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(ent['body'])))
         self.end_headers()
         self.wfile.write(ent['body'])
+
+    def _schedule_remote_revalidate(self, node, remote_ip, remote_port,
+                                    rel_path, query, api_p):
+        """Lazily re-fetch a stale remote entry in the background.
+
+        Remote (px) entries have no permanent warmer (the owning host warms
+        itself; we removed cross-VPC polling on purpose to stop 502 spam).
+        But stale-while-revalidate would then mask a genuinely dead remote
+        forever, because the 5xx/transfer-failure branch is only reached when
+        the origin is re-contacted. This dedups + throttles: at most one
+        in-flight revalidation per (node, path, query), and only revalidates
+        entries older than REMOTE_REVALIDATE_SECS.
+        """
+        key = (node, 'GET', api_p, query)
+        with CACHE_LOCK:
+            ent = CACHE.get(key)
+            if not ent:
+                return False
+            if time.time() - ent['ts'] < REMOTE_REVALIDATE_SECS:
+                return False  # fresh enough, skip
+            if key in _REMOTE_REVALIDATING:
+                return False  # already being revalidated
+            _REMOTE_REVALIDATING.add(key)
+
+        def _revalidate():
+            try:
+                self._remote_refetch(node, remote_ip, remote_port,
+                                     rel_path + query, api_p, query)
+            finally:
+                with CACHE_LOCK:
+                    _REMOTE_REVALIDATING.discard(key)
+
+        threading.Thread(target=_revalidate, daemon=True).start()
+        return True
+
+    def _remote_refetch(self, node, remote_ip, remote_port, path_query,
+                        api_p, query):
+        """Fetch a remote origin and update cache + failure counter only.
+
+        Never writes to the client socket (runs in a background thread after
+        the stale entry has already been served). Keeps the per-node
+        consecutive-failure gate alive for remote nodes so a real outage
+        eventually breaks through stale-while-revalidate.
+        """
+        try:
+            conn = http.client.HTTPConnection(remote_ip, remote_port, timeout=30)
+            try:
+                headers = {
+                    'Host': f'{remote_ip}:{remote_port}',
+                    'Accept-Encoding': 'identity',
+                    'Authorization': 'Bearer ' + panel_password(),
+                    'Connection': 'close',
+                }
+                conn.request('GET', path_query, headers=headers)
+                resp = conn.getresponse()
+                data = resp.read()
+                if resp.status == 200:
+                    saved = [(k, v) for k, v in resp.getheaders()
+                             if k.lower() in ('content-type', 'content-encoding', 'vary')]
+                    cache_put(node, 'GET', api_p, query, 200, saved, data)
+                elif resp.status >= 500:
+                    cache_fail(node)
+            finally:
+                conn.close()
+        except Exception:
+            cache_fail(node)
 
     def _handle_user_rules(self, method: str, rel_path: str):
         if not authorized(self):
@@ -488,6 +562,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ent = None if refresh else cache_get(node, method, api_p, query)
             if ent is not None:
                 self._reply_cached(ent)
+                # Stale remote entry just served: revalidate it in the
+                # background so a dead/failing remote is surfaced instead of
+                # being masked forever by stale-while-revalidate. Demand-driven
+                # + deduplicated, so it only refetches when actually read.
+                self._schedule_remote_revalidate(node, remote_ip, remote_port,
+                                                 rel_path, query, api_p)
                 return
 
         conn = http.client.HTTPConnection(remote_ip, remote_port, timeout=30)
