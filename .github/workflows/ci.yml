@@ -57,6 +57,17 @@ jobs:
           node -e "JSON.parse(fs.readFileSync('zashboard/dist/manifest.webmanifest'))"
           echo "JSON files are valid."
 
+      - name: Validate & rebuild UI extension (src -> dist)
+        run: |
+          echo "Checking user-rules-ui.js syntax (source + built asset)..."
+          node --check zashboard/src/user-rules-ui.js
+          node --check zashboard/dist/assets/user-rules-ui.js
+          echo "Rebuilding dist from src to guarantee they stay in sync..."
+          node scripts/build-ui.mjs
+          echo "Verifying rebuilt dist is byte-identical to committed dist..."
+          git diff --exit-code -- zashboard/dist/assets/user-rules-ui.js zashboard/dist/index.html
+          echo "UI build is reproducible."
+
       - name: Build Deployable Package
         id: build_pkg
         run: |

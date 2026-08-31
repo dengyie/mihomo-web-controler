@@ -66,29 +66,56 @@ def get_remote_node_ip(target_node: str) -> str:
     return '127.0.0.1'
 
 
+class ReconcilerLoadError(RuntimeError):
+    """Raised when the reconciler module can NOT be loaded on first import \
+    (missing runtime dep such as PyYAML, syntax error, etc). \
+    Distinct from "file absent" (which is not an error condition)."""
+
+
 def get_reconciler():
+    """Return the loaded reconciler module, or None if the source file is \
+    absent. A *failure to load an existing file* raises :class:`ReconcilerLoadError` \
+    instead of silently degrading, so the real cause (missing dep / syntax / \
+    permission) surfaces to callers and logs instead of a misleading "unavailable"."""
     global _reconciler_mtime, _reconciler_module
     if not RECONCILER_PATH.exists():
         return None
-    try:
-        current_mtime = os.path.getmtime(RECONCILER_PATH)
-        if _reconciler_module is None or current_mtime > _reconciler_mtime:
-            spec = importlib.util.spec_from_file_location("rules_reconciler", str(RECONCILER_PATH))
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                _reconciler_module = mod
-                _reconciler_mtime = current_mtime
-        return _reconciler_module
-    except Exception as e:
-        print(f"Failed to load/reload reconciler module: {e}", flush=True)
-        return _reconciler_module
+    current_mtime = os.path.getmtime(RECONCILER_PATH)
+    if _reconciler_module is None or current_mtime > _reconciler_mtime:
+        spec = importlib.util.spec_from_file_location("rules_reconciler", str(RECONCILER_PATH))
+        if spec is None or spec.loader is None:
+            raise ReconcilerLoadError(
+                f"Cannot create a module spec/loader for {RECONCILER_PATH}")
+        try:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            if _reconciler_module is None:
+                # First load failed -> do NOT hide it (this is how the missing
+                # PyYAML case went unnoticed in production).
+                raise ReconcilerLoadError(
+                    f"Failed to load {RECONCILER_PATH}: {e!r}. "
+                    "Check runtime deps (e.g. PyYAML) and file syntax.") from e
+            # We already hold a known-good module: keep serving it (resilience
+            # against a transient reload), but log the reload failure loudly and
+            # avoid retrying on every request until the file next changes.
+            print(f"Reconciler reload FAILED; keeping last good module: {e!r}", flush=True)
+            _reconciler_mtime = current_mtime
+            return _reconciler_module
+        _reconciler_module = mod
+        _reconciler_mtime = current_mtime
+    return _reconciler_module
 
 
 def panel_password():
+    """Return the panel API password, or '' if no panel.password file is    \
+    configured. No hardcoded default: this gateway must fail closed (deny    \
+    /panel/api) rather than expose a well-known credential. The same value is    \
+    injected into the served ``index.html`` in place of the __PANEL_PASSWORD__    \
+    placeholder so the frontend never ships a literal secret."""
     if PANEL_PASSWORD_FILE.exists():
-        return PANEL_PASSWORD_FILE.read_text().strip()
-    return "2625451001"
+        return PANEL_PASSWORD_FILE.read_text().strip() or ''
+    return ''
 
 
 STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
@@ -302,7 +329,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        reconciler = get_reconciler()
+        try:
+            reconciler = get_reconciler()
+        except ReconcilerLoadError as e:
+            # Do NOT hide the real load failure (missing dep / syntax / spec).
+            self.send_json(500, {'error': f'Rules reconciler module failed to load: {e}'})
+            return
         if not reconciler:
             self.send_json(500, {'error': 'Rules reconciler module is unavailable'})
             return
@@ -759,6 +791,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         data = target.read_bytes()
+        if target.name == 'index.html':
+            # Inject the real panel password into the served entry page in place
+            # of the __PANEL_PASSWORD__ placeholder. index.html is served with
+            # Cache-Control: no-store (below) so the injected secret is never
+            # cached; the static bundle keeps no literal password.
+            data = data.replace(b'__PANEL_PASSWORD__', panel_password().encode('utf-8'))
         self.send_response(200)
         self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
         self.send_header('Content-Length', str(len(data)))

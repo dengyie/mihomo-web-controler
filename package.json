@@ -12,7 +12,9 @@
   "scripts": {
     "start": "python3 zashboard/gateway.py",
     "reconcile": "python3 clash/rules-reconciler.py --reconcile",
-    "dry-run": "python3 clash/rules-reconciler.py --dry-run"
+    "dry-run": "python3 clash/rules-reconciler.py --dry-run",
+    "build:ui": "node scripts/build-ui.mjs",
+    "check:ui": "node --check zashboard/src/user-rules-ui.js && node --check zashboard/dist/assets/user-rules-ui.js"
   },
   "keywords": [
     "mihomo",
