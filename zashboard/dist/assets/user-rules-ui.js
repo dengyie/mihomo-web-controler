@@ -98,7 +98,8 @@
         gap: 8px;
         pointer-events: none;
       `;
-      document.body.appendChild(toast);\n    }
+      document.body.appendChild(toast);
+    }
     const item = document.createElement('div');
     const isSuccess = type === 'success';
     const isError = type === 'error';
@@ -109,7 +110,8 @@
     setTimeout(() => {
       item.style.opacity = '0';
       item.style.transition = 'opacity 0.3s ease';
-      setTimeout(() => item.remove(), 300);\n    }, 3000);
+      setTimeout(() => item.remove(), 300);
+    }, 3000);
   }
 
   function getActiveBackend() {
