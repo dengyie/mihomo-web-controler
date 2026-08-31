@@ -20,6 +20,19 @@ UPSTREAM_PORT = 9090
 PANEL_PASSWORD_FILE = Path('/personal/zashboard/panel.password')
 RECONCILER_PATH = Path('/personal/clash/rules-reconciler.py')
 
+# Static file byte cache. /personal is NFS, so every uncached request costs a
+# full file read round-trip; validate by (mtime_ns, size) so file swaps are
+# always picked up. NOTE: the per-request __PANEL_PASSWORD__ injection happens
+# AFTER this cache (on the cached raw bytes), so a panel-password rotation does
+# not require invalidating anything here.
+_STATIC_CACHE = {}
+_STATIC_CACHE_MAX_ENTRIES = 64
+_STATIC_CACHE_MAX_BYTES = 32 * 1024 * 1024  # bound memory: hashed assets stay on
+# disk across deploys, so entry count alone is not a safe bound (dist big JS
+# alone is ~1.5MB/file). Cache is wiped wholesale when either bound is hit —
+# cheap and self-healing since repopulation is just file reads.
+_STATIC_CACHE_LOCK = threading.Lock()
+
 _reconciler_mtime = 0
 _reconciler_module = None
 
@@ -828,7 +841,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not target.is_file():
             self.send_error(404)
             return
-        data = target.read_bytes()
+        try:
+            st = target.stat()
+            cache_key = str(target)
+            with _STATIC_CACHE_LOCK:
+                cached = _STATIC_CACHE.get(cache_key)
+                if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                    data = cached[2]
+                else:
+                    cached = None
+            if cached is None:
+                data = target.read_bytes()
+                with _STATIC_CACHE_LOCK:
+                    total = sum(len(v[2]) for v in _STATIC_CACHE.values())
+                    if (len(_STATIC_CACHE) >= _STATIC_CACHE_MAX_ENTRIES
+                            or total + len(data) > _STATIC_CACHE_MAX_BYTES):
+                        _STATIC_CACHE.clear()
+                    _STATIC_CACHE[cache_key] = (st.st_mtime_ns, st.st_size, data)
+        except OSError:
+            self.send_error(404)
+            return
         if target.name == 'index.html':
             # Inject the real panel password into the served entry page in place
             # of the __PANEL_PASSWORD__ placeholder. index.html is served with

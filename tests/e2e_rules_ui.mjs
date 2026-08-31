@@ -22,6 +22,15 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(`console.error: ${m.text()}`); });
 
+// Capture the POST response so the test rule can be cleaned up afterwards
+// (otherwise every run leaves a orphan rule in the production user-rules.yaml).
+const postResponses = [];
+page.on('response', async (res) => {
+  if (res.request().method() === 'POST' && res.url().includes('user-rules')) {
+    postResponses.push(res);
+  }
+});
+
 log(`[1] goto ${url}`);
 await page.goto(url, { waitUntil: 'load', timeout: 60000 }).catch((e) => errors.push(`goto: ${e.message}`));
 // injection triggers on 300ms interval; allow SPA async render.
@@ -78,6 +87,34 @@ if (modal.exists && modal.hasAdd && !fatalJsError) {
   log(`[7] save UI: ${JSON.stringify(saveUi)}`);
   const ok = saveUi && !saveUi.error && (saveUi.listView || /规则保存成功/.test(saveUi.toastText || ''));
   if (!ok) FAIL.push('save did not show success toast or switch to list view');
+
+  // [8] Cleanup: delete the rule this test just created (fail-loud, never
+  // leave pollution in the production user-rules.yaml).
+  let createdId = null;
+  for (const res of postResponses) {
+    try {
+      const body = await res.json();
+      if (body && body.rule && body.rule.id && body.rule.payload === payload) createdId = body.rule.id;
+    } catch (_) { /* non-JSON response; skip */ }
+  }
+  if (createdId) {
+    const del = await page.evaluate(async (id) => {
+      const entry = JSON.parse(localStorage.getItem('setup/api-list') || '[]')
+        .find((x) => x.uuid === localStorage.getItem('setup/active-uuid')) || {};
+      const base = entry.secondaryPath ? entry.secondaryPath.replace(/\/+$/, '') : '/panel/api';
+      const r = await fetch(base + '/user-rules/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer ' + (entry.password || '') },
+      });
+      let success = false;
+      try { success = (await r.json()).success === true; } catch (_) {}
+      return { status: r.status, success };
+    }, createdId);
+    log(`[8] cleanup delete ${createdId}: ${JSON.stringify(del)}`);
+    if (!del.success) FAIL.push(`cleanup DELETE failed (${JSON.stringify(del)}): rule ${createdId} left behind`);
+  } else {
+    FAIL.push('could not capture created rule id from POST response; cleanup skipped');
+  }
 }
 
 await browser.close();

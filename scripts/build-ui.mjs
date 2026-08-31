@@ -24,9 +24,20 @@ if (process.env.CI !== 'true') {
 }
 
 const code = readFileSync(src, 'utf8');
-// Sanity: the shipped bundle must not contain a hardcoded panel password.
-if (code.includes('2625251001')) {
-  throw new Error('Refusing to build: source contains hardcoded panel password literal.');
+// Sanity: nothing that ships to browsers may contain the real panel password.
+// (The historical hardcoded secret was 2625451001; the placeholder
+// __PANEL_PASSWORD__ is replaced server-side at serve time, never at build.)
+const PANEL_SECRET = '2625451001';
+const shipped = {
+  'zashboard/src/user-rules-ui.js': code,
+  'zashboard/dist/assets/user-rules-ui.js': code,
+  'zashboard/dist/index.html': readFileSync(indexHtml, 'utf8'),
+  'zashboard/gateway.py': readFileSync(resolve(root, 'zashboard/gateway.py'), 'utf8'),
+};
+for (const [name, text] of Object.entries(shipped)) {
+  if (text.includes(PANEL_SECRET)) {
+    throw new Error(`Refusing to build: ${name} contains hardcoded panel password literal.`);
+  }
 }
 
 const hash = createHash('sha256').update(code).digest('hex').slice(0, 12);
