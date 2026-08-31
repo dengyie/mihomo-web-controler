@@ -166,7 +166,11 @@
       console.warn('Failed to fetch user-rules:', e);
     } finally {
       userRulesState.loading = false;
-      if (userRulesState.showModal) {
+      // Never rebuild the add form from a background GET. Opening the modal
+      // kicks off fetchUserRules(); if that GET lands after the user has
+      // switched to "add" (or is mid-submit), renderModal() would wipe the
+      // typed payload, drop the submit handler, and swallow the success toast.
+      if (userRulesState.showModal && userRulesState.viewMode !== 'add') {
         renderModal();
       }
     }
@@ -218,7 +222,14 @@
         return false;
       }
       showToast('✅ 规则保存成功并已热重载生效！', 'success');
+      // Switch to list immediately so the user sees the result without waiting
+      // for the follow-up GET (POST already took the reconcile round-trip).
+      if (data.rule && data.rule.id) {
+        const exists = userRulesState.rules.some((r) => r.id === data.rule.id);
+        if (!exists) userRulesState.rules = [data.rule, ...userRulesState.rules];
+      }
       userRulesState.viewMode = 'list';
+      renderModal();
       await fetchUserRules();
       return true;
     } catch (e) {
@@ -331,17 +342,23 @@
         renderModal();
       };
       modalEl.querySelector('#btn-submit-add').onclick = async (e) => {
-        const payload = payloadEl.value.trim();
+        e.preventDefault();
+        e.stopPropagation();
+        const liveType = document.getElementById('modal-rule-type');
+        const livePayload = document.getElementById('modal-rule-payload');
+        const liveTarget = document.getElementById('modal-rule-target');
+        const payload = (livePayload ? livePayload.value : payloadEl.value).trim();
         if (!payload) {
           alert('请输入匹配目标 (Payload)');
           return;
         }
+        const submitBtn = e.currentTarget || e.target;
         await saveUserRule({
-          type: typeEl.value,
+          type: (liveType || typeEl).value,
           payload: payload,
-          target: targetEl.value,
+          target: (liveTarget || targetEl).value,
           enabled: true,
-        }, e.target);
+        }, submitBtn);
       };
       return;
     }

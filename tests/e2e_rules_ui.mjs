@@ -51,6 +51,35 @@ const fatalJsError = errors.some((e) => /SyntaxError|Invalid or unexpected token
 log(`[5] JS syntax errors: ${fatalJsError}`);
 if (fatalJsError) FAIL.push('user-rules-ui.js failed to parse (syntax error)');
 
+// Save-flow regression: a background GET used to rebuild the add form and
+// swallow the success toast. POST reconcile is ~11s, so wait generously.
+const payload = `e2e-${Date.now()}.example.com`;
+if (modal.exists && modal.hasAdd && !fatalJsError) {
+  log(`[6] add + save ${payload}`);
+  await page.click('#btn-go-add');
+  await page.waitForSelector('#modal-rule-payload', { timeout: 5000 });
+  await page.locator('#modal-rule-payload').click();
+  await page.locator('#modal-rule-payload').fill('');
+  await page.locator('#modal-rule-payload').pressSequentially(payload, { delay: 20 });
+  const typed = await page.inputValue('#modal-rule-payload');
+  log(`[6b] typed payload: ${JSON.stringify(typed)}`);
+  if (typed.trim() !== payload) FAIL.push(`payload input did not keep typed value (got ${JSON.stringify(typed)})`);
+  await page.click('#btn-submit-add');
+  const saveUi = await page.waitForFunction(() => {
+    const toast = document.getElementById('user-rules-toast');
+    const toastText = toast ? Array.from(toast.children).map((x) => x.textContent).join(' ') : '';
+    const modalEl = document.getElementById('user-rules-manager-modal');
+    const html = modalEl ? modalEl.innerHTML : '';
+    const listView = html.includes('btn-go-add') && !html.includes('btn-submit-add');
+    const success = listView || /规则保存成功/.test(toastText);
+    if (!success) return false;
+    return { toastText, listView, hasSubmit: html.includes('btn-submit-add') };
+  }, null, { timeout: 25000 }).then((h) => h.jsonValue()).catch((e) => ({ error: e.message }));
+  log(`[7] save UI: ${JSON.stringify(saveUi)}`);
+  const ok = saveUi && !saveUi.error && (saveUi.listView || /规则保存成功/.test(saveUi.toastText || ''));
+  if (!ok) FAIL.push('save did not show success toast or switch to list view');
+}
+
 await browser.close();
 
 if (FAIL.length) {
