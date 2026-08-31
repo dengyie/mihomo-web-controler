@@ -1,0 +1,18 @@
+# mimomo-web-controler gateway runtime dependencies.
+# The gateway is intentionally stdlib-only for its web stack; PyYAML is the one
+# optional-but-strongly-required third-party dep used by the *reconciler* module
+# (rules-reconciler.py, loaded at runtime via importlib). Without it the
+# reconciler cannot load and /panel/api/user-rules returns a 500 (see
+# ReconcilerLoadError / §十一).
+#
+# Install into whatever interpreter runs the gateway. NOTE the gateway ran under
+# bare `python3` whose PATH is decided by supervisord (see §12): if that
+# interpreter lacks yaml, install it with:
+#   python3 -m pip install -r requirements.txt
+# or (Debian/Ubuntu system python, no pip):
+#   sudo apt-get install -y python3-yaml
+PyYAML>=5.4
+# test-only (not required at runtime):
+#   python3 -m unittest discover -s tests
+# Playwright e2e:
+#   npm install ; npx playwright install

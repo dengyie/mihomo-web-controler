@@ -14,7 +14,9 @@
     "reconcile": "python3 clash/rules-reconciler.py --reconcile",
     "dry-run": "python3 clash/rules-reconciler.py --dry-run",
     "build:ui": "node scripts/build-ui.mjs",
-    "check:ui": "node --check zashboard/src/user-rules-ui.js && node --check zashboard/dist/assets/user-rules-ui.js"
+    "check:ui": "node --check zashboard/src/user-rules-ui.js && node --check zashboard/dist/assets/user-rules-ui.js",
+    "check:api": "python3 -m unittest discover -s tests",
+    "check:configs": "bash scripts/check-configs.sh"
   },
   "keywords": [
     "mihomo",

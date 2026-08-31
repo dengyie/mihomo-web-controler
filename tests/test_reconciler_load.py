@@ -90,5 +90,39 @@ class ReconcilerLoadSemanticsTests(unittest.TestCase):
         self.assertIs(self.gw.get_reconciler(), mod)   # cached, no re-import
 
 
+class StartupDiagnosticsTests(unittest.TestCase):
+    """The gateway prints a labelled diagnostics block at startup so a broken
+    environment (wrong interpreter / missing PyYAML / reconciler syntax error)
+    is visible in the log on boot, not only as a request-time 500. The function
+    must run without throwing regardless of environment health."""
+    @classmethod
+    def setUpClass(cls):
+        cls.gw = _load_gateway()
+
+    def test_diagnostics_prints_required_fields(self):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.gw._startup_diagnostics()
+        out = buf.getvalue()
+        self.assertIn('--- zashboard-gateway startup diagnostics ---', out)
+        for field in ('interpreter', 'pyyaml', 'reconciler', 'password file'):
+            self.assertIn(field, out)
+
+    def test_diagnostics_reports_missing_reconciler_without_crash(self):
+        import io
+        import contextlib
+        orig = self.gw.RECONCILER_PATH
+        try:
+            self.gw.RECONCILER_PATH = Path('/nonexistent/rules-reconciler.py')
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.gw._startup_diagnostics()   # must NOT raise
+            self.assertIn('reconciler', buf.getvalue())
+        finally:
+            self.gw.RECONCILER_PATH = orig
+
+
 if __name__ == '__main__':
     unittest.main()

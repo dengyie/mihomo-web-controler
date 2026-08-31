@@ -118,6 +118,36 @@ def panel_password():
     return ''
 
 
+def _startup_diagnostics():
+    """Print a clearly-labelled block of runtime health diagnostics once at  \
+    startup so environment drift (wrong interpreter, missing PyYAML, reconciler \
+    syntax error) is obvious in the gateway log instead of surfacing only as a \
+    500 on first /panel/api user-rules request. Does NOT change run behaviour;  \
+    errors are reported, not thrown (the gateway still boots)."""
+    try:
+        import sys as _sys
+        interp = _sys.executable
+        pyver = _sys.version.split()[0]
+    except Exception:
+        interp = pyver = 'unknown'
+    try:
+        import yaml  # noqa: F401
+        yaml_ok = 'yaml@' + getattr(yaml, '__version__', '?')
+    except Exception as e:
+        yaml_ok = 'MISSING ({!r})'.format(e)
+    try:
+        rec = get_reconciler()
+        rec_ok = 'loaded' if rec is not None else 'absent (NO reconciler file)'
+    except ReconcilerLoadError as e:
+        rec_ok = 'LOAD ERROR ({!r})'.format(e)
+    print('--- zashboard-gateway startup diagnostics ---', flush=True)
+    print('  interpreter  : ' + interp + ' (python ' + pyver + ')', flush=True)
+    print('  pyyaml       : ' + yaml_ok, flush=True)
+    print('  reconciler   : ' + rec_ok, flush=True)
+    print('  password file: ' + ('present' if PANEL_PASSWORD_FILE.exists() else "MISSING (fail-closed: '')"), flush=True)
+    print('--- end diagnostics ---', flush=True)
+
+
 STREAM_ENDPOINTS = {'/traffic', '/connections', '/logs', '/memory'}
 
 # ---------------------------------------------------------------------------
@@ -822,6 +852,7 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__ == '__main__':
     record_node_ip()
+    _startup_diagnostics()
 
     WARM_INTERVAL = 10
     WARM_ENDPOINTS = ['/version', '/proxies', '/rules', '/configs']
