@@ -259,11 +259,19 @@ def api_path(raw_path):
 
 
 def authorized(handler):
+    secret = panel_password()
+    if not secret:
+        # Fail closed: an empty/missing password must NEVER open the panel.
+        # Otherwise `compare_digest('', '')` is True and the query-token path
+        # would authenticate an unauthenticated request. Reject outright.
+        return False
     value = handler.headers.get('Authorization', '')
     if value:
-        return secrets.compare_digest(value, 'Bearer ' + panel_password())
+        return secrets.compare_digest(value, 'Bearer ' + secret)
     token = parse_qs(urlsplit(handler.path).query).get('token', [''])[0]
-    return secrets.compare_digest(token, panel_password())
+    # Require a non-empty token on the query-string path so `?token=` empty
+    # cannot match a real secret (or an empty one) via compare_digest.
+    return bool(token) and secrets.compare_digest(token, secret)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -825,7 +833,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Inject the real panel password into the served entry page in place
             # of the __PANEL_PASSWORD__ placeholder. index.html is served with
             # Cache-Control: no-store (below) so the injected secret is never
-            # cached; the static bundle keeps no literal password.
+            # cached. The seed script in index.html refreshes the stored
+            # credential to this value on every load (self-healing), so a
+            # browser carrying a stale pre-fix hardcoded password self-corrects.
             data = data.replace(b'__PANEL_PASSWORD__', panel_password().encode('utf-8'))
         self.send_response(200)
         self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')

@@ -95,6 +95,21 @@ try {
     })
   }
 
+  // Refresh the credential on any EXISTING tebi/pxed entry to the injected
+  // (current) panel password. Without this, a browser that visited before the
+  // hardcoded-password removal keeps sending the stale old secret in its
+  // localStorage, the gateway now rejects it (401), and the UI shows no success
+  // feedback even though the rule was saved. This makes the seed self-healing
+  // on every page load.
+  const injectedPw = '__PANEL_PASSWORD__'
+  for (const entry of list) {
+    if (entry && (entry.label === 'tebi' || entry.label === 'pxed' ||
+        entry.secondaryPath === '/panel/api' || entry.secondaryPath === '/panel/pxed/api' ||
+        entry.secondaryPath === '/panel/tebi/api')) {
+      entry.password = injectedPw
+    }
+  }
+
   localStorage.setItem(apiKey, JSON.stringify(list))
   if (!localStorage.getItem(activeKey)) {
     localStorage.setItem(activeKey, list[0].uuid)

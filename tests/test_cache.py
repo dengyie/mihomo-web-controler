@@ -94,6 +94,26 @@ class CacheSharedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.gw = _load_gateway()
+        # Auth setting: the gateway now fail-closes when the panel password is
+        # empty/missing (panel_password() -> ''). These proxy tests drive real
+        # Handler._proxy, which calls authorized(); they need a real secret on
+        # file so authorization passes. Point PANEL_PASSWORD_FILE at a temp file
+        # with a known value for the class lifetime.
+        import tempfile as _tf
+        cls._pw_file = _tf.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.password', delete=False)
+        cls._pw_file.write('test-secret-for-cache-tests')
+        cls._pw_file.flush()
+        cls._orig_pw = cls.gw.PANEL_PASSWORD_FILE
+        cls.gw.PANEL_PASSWORD_FILE = Path(cls._pw_file.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gw.PANEL_PASSWORD_FILE = cls._orig_pw
+        import os
+        try:
+            os.unlink(cls._pw_file.name)
+        except OSError:
+            pass
 
     def setUp(self):
         with self.gw.CACHE_LOCK:
