@@ -100,6 +100,7 @@
     data: null,
     lastFetched: 0,
   };
+  let egressDetailsOpen = false;
 
   // 订阅管理状态
   let subscriptionState = {
@@ -636,15 +637,21 @@
     const latency = fastest?.latency_ms ? Math.round(fastest.latency_ms) : null;
     const isEgressLoading = egressBadgeState.loading;
 
-    const probesHtml = (egressBadgeState.data?.probes || []).map(p => `
-      <div class="flex items-center justify-between gap-2 text-xs">
-        <span class="text-base-content/60">${escapeHtml(p.source)}</span>
-        <span class="flex min-w-0 items-center gap-3">
-          <span class="truncate font-mono">${escapeHtml(p.ip || p.error || 'N/A')}</span>
-          <span class="w-12 shrink-0 text-right font-mono ${p.success ? latencyClass(Math.round(p.latency_ms)) : 'text-error'}">${p.success ? `${Math.round(p.latency_ms)}ms` : '失败'}</span>
-        </span>
-      </div>
-    `).join('');
+    const probes = egressBadgeState.data?.all_results || egressBadgeState.data?.probes || [];
+    const probesHtml = probes.map(p => {
+      const ip = p.data?.ip || p.ip || p.error || 'N/A';
+      const isSuccess = Boolean(p.data?.ip || p.ip);
+      const ms = p.latency_ms != null ? Math.round(p.latency_ms) : null;
+      return `
+        <div class="flex items-center justify-between gap-2 text-xs">
+          <span class="text-base-content/60 font-mono">${escapeHtml(p.source)}</span>
+          <span class="flex min-w-0 items-center gap-3">
+            <span class="truncate font-mono">${escapeHtml(ip)}</span>
+            <span class="w-14 shrink-0 text-right font-mono ${isSuccess ? latencyClass(ms) : 'text-error'}">${isSuccess && ms != null ? `${ms}ms` : '失败'}</span>
+          </span>
+        </div>
+      `;
+    }).join('');
 
     const egressSectionHtml = `
       <div class="settings-section-label">出口 IP 竞速诊断</div>
@@ -663,10 +670,10 @@
             <button class="btn btn-circle btn-sm" id="btn-reprobe-egress" aria-label="重新测速" ${isEgressLoading ? 'disabled' : ''}>
               ${isEgressLoading ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('arrow-path', 'h-4 w-4')}
             </button>
-            <button class="btn btn-circle btn-ghost btn-sm" id="btn-toggle-egress-details" aria-label="竞速明细">${nativeIcon('chevron-down', 'h-4 w-4')}</button>
+            <button class="btn btn-circle btn-ghost btn-sm transition-transform duration-200 ${egressDetailsOpen ? 'rotate-180' : ''}" id="btn-toggle-egress-details" aria-label="竞速明细">${nativeIcon('chevron-down', 'h-4 w-4')}</button>
           </div>
         </div>
-        <div id="egress-details-container" class="hidden flex-col gap-2 p-4">
+        <div id="egress-details-container" class="${egressDetailsOpen ? 'flex' : 'hidden'} flex-col gap-2 p-4">
           ${probesHtml || '<div class="text-xs text-base-content/40">暂无竞速明细</div>'}
         </div>
       </div>
@@ -843,11 +850,8 @@
 
     pageContainer.querySelector('#btn-reprobe-egress')?.addEventListener('click', () => fetchEgressIp(true));
     pageContainer.querySelector('#btn-toggle-egress-details')?.addEventListener('click', () => {
-      const container = pageContainer.querySelector('#egress-details-container');
-      if (container) {
-        container.classList.toggle('hidden');
-        container.classList.toggle('flex');
-      }
+      egressDetailsOpen = !egressDetailsOpen;
+      renderToolkitSubpage();
     });
 
     pageContainer.querySelector('#btn-show-add-sub')?.addEventListener('click', () => {
