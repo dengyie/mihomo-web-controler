@@ -12,6 +12,7 @@ import socket
 import socketserver
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
