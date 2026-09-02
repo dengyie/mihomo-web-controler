@@ -112,7 +112,16 @@ class MockElement {
   }
 
   get innerHTML() {
-    return this._innerHTML || '';
+    if (this._innerHTML) {
+      let html = this._innerHTML;
+      for (const child of this.children) {
+        if (child.id && child._innerHTML) {
+          html = html.replace(`id="${child.id}"></div>`, `id="${child.id}">${child.innerHTML}</div>`);
+        }
+      }
+      return html;
+    }
+    return '';
   }
 
   addEventListener(event, fn) {
@@ -312,7 +321,13 @@ assert.ok(subpage.innerHTML.includes('settings-grid'), 'Subpage uses native sett
 assert.ok(subpage.innerHTML.includes('need-blur'), 'Subpage uses native sticky topbar');
 assert.ok(subpage.innerHTML.includes('data-slot="icon"'), 'Subpage uses native Heroicons');
 
-console.log('✅ Toolkit Subpage Navigation and View Switching passed');
+assert.ok(subpage.querySelector('#toolkit-egress-slot'), 'Slot #toolkit-egress-slot exists');
+assert.ok(subpage.querySelector('#toolkit-subs-slot'), 'Slot #toolkit-subs-slot exists');
+assert.ok(subpage.querySelector('#toolkit-sim-slot'), 'Slot #toolkit-sim-slot exists');
+assert.strictEqual(bundleCode.includes('uiIcon('), false, 'uiIcon is completely removed');
+assert.strictEqual(bundleCode.includes('const ICONS ='), false, 'ICONS dictionary is completely removed');
+
+console.log('✅ Toolkit Subpage Navigation, View Switching, and Slot Components passed');
 
 // 3. Switch back to #/proxies
 global.location.hash = '#/proxies';

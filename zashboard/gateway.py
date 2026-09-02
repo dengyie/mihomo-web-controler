@@ -1043,9 +1043,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers['Accept-Encoding'] = 'identity'
         headers['Host'] = f'{remote_ip}:{remote_port}'
         # Ensure valid inter-gateway authentication across the cluster (tebi <-> pxed)
-        pw = panel_password()
-        if pw:
-            headers['Authorization'] = 'Bearer ' + pw
+        # Defense-in-depth: only attach gateway secret if the incoming request is already authenticated
+        if self._is_authenticated():
+            pw = panel_password()
+            if pw:
+                headers['Authorization'] = 'Bearer ' + pw
         length = int(self.headers.get('Content-Length', '0'))
         body = self.rfile.read(length) if length else None
         try:
