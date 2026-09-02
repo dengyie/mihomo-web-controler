@@ -10,6 +10,7 @@
     "url": "https://github.com/dengyie/mihomo-web-controler.git"
   },
   "scripts": {
+    "test": "npm run check:ui && node tests/test_ui_bundle.mjs && pytest",
     "start": "python3 zashboard/gateway.py",
     "reconcile": "python3 clash/rules-reconciler.py --reconcile",
     "dry-run": "python3 clash/rules-reconciler.py --dry-run",

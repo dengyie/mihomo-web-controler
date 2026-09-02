@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import concurrent.futures
 import http.client
 import http.server
 import importlib.util
@@ -14,11 +15,18 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-ROOT = Path('/personal/zashboard/dist').resolve()
-UPSTREAM_HOST = '127.0.0.1'
-UPSTREAM_PORT = 9090
-PANEL_PASSWORD_FILE = Path('/personal/zashboard/panel.password')
-RECONCILER_PATH = Path('/personal/clash/rules-reconciler.py')
+# Environment variable support for directories and paths
+ROOT = Path(os.environ.get('ZASHBOARD_DIST', '/personal/zashboard/dist')).resolve()
+UPSTREAM_HOST = os.environ.get('MIHOMO_API_HOST', '127.0.0.1')
+UPSTREAM_PORT = int(os.environ.get('MIHOMO_API_PORT', '9090'))
+
+PANEL_PASSWORD_FILE_ENV = os.environ.get('PANEL_PASSWORD_FILE')
+PANEL_PASSWORD_FILE = Path(PANEL_PASSWORD_FILE_ENV).resolve() if PANEL_PASSWORD_FILE_ENV else Path('/personal/zashboard/panel.password')
+
+CLASH_ROOT_ENV = os.environ.get('CLASH_ROOT')
+CLASH_ROOT = Path(CLASH_ROOT_ENV).resolve() if CLASH_ROOT_ENV else Path('/personal/clash')
+RECONCILER_PATH = CLASH_ROOT / 'rules-reconciler.py'
+SUBSCRIPTION_MANAGER_PATH = CLASH_ROOT / 'subscription-manager.py'
 
 # Static file byte cache. /personal is NFS, so every uncached request costs a
 # full file read round-trip; validate by (mtime_ns, size) so file swaps are
@@ -35,6 +43,35 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 _reconciler_mtime = 0
 _reconciler_module = None
+_sub_manager_mtime = 0
+_sub_manager_module = None
+
+
+class SubManagerLoadError(RuntimeError):
+    """Raised when the subscription-manager module cannot be loaded."""
+
+
+def get_sub_manager():
+    global _sub_manager_mtime, _sub_manager_module
+    if not SUBSCRIPTION_MANAGER_PATH.exists():
+        return None
+    current_mtime = os.path.getmtime(SUBSCRIPTION_MANAGER_PATH)
+    if _sub_manager_module is None or current_mtime > _sub_manager_mtime:
+        spec = importlib.util.spec_from_file_location("subscription_manager", str(SUBSCRIPTION_MANAGER_PATH))
+        if spec is None or spec.loader is None:
+            raise SubManagerLoadError(f"Cannot create a module spec/loader for {SUBSCRIPTION_MANAGER_PATH}")
+        try:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            if _sub_manager_module is None:
+                raise SubManagerLoadError(f"Failed to load {SUBSCRIPTION_MANAGER_PATH}: {e!r}") from e
+            print(f"Subscription manager reload FAILED; keeping last good module: {e!r}", flush=True)
+            _sub_manager_mtime = current_mtime
+            return _sub_manager_module
+        _sub_manager_module = mod
+        _sub_manager_mtime = current_mtime
+    return _sub_manager_module
 
 
 def is_pxed_host() -> bool:
@@ -153,10 +190,16 @@ def _startup_diagnostics():
         rec_ok = 'loaded' if rec is not None else 'absent (NO reconciler file)'
     except ReconcilerLoadError as e:
         rec_ok = 'LOAD ERROR ({!r})'.format(e)
+    try:
+        sm = get_sub_manager()
+        sm_ok = 'loaded' if sm is not None else 'absent (NO subscription manager file)'
+    except SubManagerLoadError as e:
+        sm_ok = 'LOAD ERROR ({!r})'.format(e)
     print('--- zashboard-gateway startup diagnostics ---', flush=True)
     print('  interpreter  : ' + interp + ' (python ' + pyver + ')', flush=True)
     print('  pyyaml       : ' + yaml_ok, flush=True)
     print('  reconciler   : ' + rec_ok, flush=True)
+    print('  sub_manager  : ' + sm_ok, flush=True)
     print('  password file: ' + ('present' if PANEL_PASSWORD_FILE.exists() else "MISSING (fail-closed: '')"), flush=True)
     print('--- end diagnostics ---', flush=True)
 
@@ -271,7 +314,54 @@ def api_path(raw_path):
     return urlsplit(raw_path).path.split('/panel/api', 1)[-1] or '/'
 
 
-def authorized(handler):
+def _probe_egress_source(src: Dict[str, Any], timeout: float = 3.5, use_proxy: bool = True, proxy_port: int = 7897) -> Optional[Dict[str, Any]]:
+    """Probe a single egress diagnosis source and return parsed network info."""
+    req = urllib.request.Request(
+        src['url'],
+        headers={'User-Agent': 'curl/8.1.2'}
+    )
+    proxies = {}
+    if use_proxy:
+        proxies = {
+            'http': f'http://127.0.0.1:{proxy_port}',
+            'https': f'http://127.0.0.1:{proxy_port}',
+        }
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+    else:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    with opener.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode('utf-8', errors='ignore')
+        parsed_info = {}
+        if src.get('type') == 'json':
+            j = json.loads(raw)
+            parsed_info = {
+                'ip': j.get('ip') or j.get('query'),
+                'country': j.get('country'),
+                'city': j.get('city'),
+                'region': j.get('region'),
+                'org': j.get('org') or j.get('as'),
+                'loc': j.get('loc') or (f"{j.get('lat')},{j.get('lon')}" if 'lat' in j else None),
+            }
+        elif src.get('type') == 'trace':
+            trace_dict = dict(line.split('=', 1) for line in raw.strip().split('\n') if '=' in line)
+            parsed_info = {
+                'ip': trace_dict.get('ip'),
+                'country': trace_dict.get('loc'),
+                'warp': trace_dict.get('warp'),
+                'colo': trace_dict.get('colo'),
+            }
+        if parsed_info.get('ip'):
+            return parsed_info
+# Diagnostics thread pool
+DIAGNOSTICS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix='egress-probe'
+)
+
+
+def _is_authenticated(handler) -> bool:
+    """Check if the incoming request handler has valid panel authentication."""
     secret = panel_password()
     if not secret:
         # Fail closed: an empty/missing password must NEVER open the panel.
@@ -287,8 +377,15 @@ def authorized(handler):
     return bool(token) and secrets.compare_digest(token, secret)
 
 
+# Backwards compatibility alias if needed by external callers
+authorized = _is_authenticated
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+
+    def _is_authenticated(self) -> bool:
+        return _is_authenticated(self)
 
     def send_json(self, status: int, data: dict):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
@@ -372,8 +469,279 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             cache_fail(node)
 
+    def _handle_subscriptions(self, method: str, rel_path: str):
+        if not self._is_authenticated():
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.send_header('WWW-Authenticate', 'Bearer')
+            self.end_headers()
+            return
+
+        try:
+            sm = get_sub_manager()
+        except SubManagerLoadError as e:
+            self.send_json(500, {'status': 'error', 'error': f'Subscription manager module failed to load: {e}'})
+            return
+        if not sm:
+            self.send_json(500, {'status': 'error', 'error': 'Subscription manager module is unavailable'})
+            return
+
+        engine = sm.SubscriptionEngine()
+        subpath = rel_path[len('/panel/api/subscriptions'):].strip('/')
+        parts = [p for p in subpath.split('/') if p]
+
+        length = int(self.headers.get('Content-Length', '0'))
+        body_bytes = self.rfile.read(length) if length else b''
+        payload = {}
+        if body_bytes:
+            try:
+                payload = json.loads(body_bytes.decode('utf-8'))
+            except Exception as e:
+                self.send_json(400, {'status': 'error', 'error': f'Invalid JSON body: {e}'})
+                return
+
+        # GET /panel/api/subscriptions -> list subscriptions
+        if method == 'GET' and len(parts) == 0:
+            subs = engine.list_subscriptions()
+            self.send_json(200, {'status': 'ok', 'data': {'subscriptions': subs}})
+            return
+
+        # POST /panel/api/subscriptions/import-nodes
+        if method == 'POST' and len(parts) == 1 and parts[0] == 'import-nodes':
+            name = payload.get('name', 'imported-nodes')
+            raw_text = payload.get('text') or payload.get('raw_content') or payload.get('content') or ''
+            if not raw_text:
+                self.send_json(400, {'status': 'error', 'error': 'Missing raw text / content for import'})
+                return
+            exclude_filter = payload.get('exclude_filter')
+            res = engine.import_raw_nodes(name=name, raw_text=raw_text, exclude_filter=exclude_filter)
+            if res.get('success'):
+                cache_invalidate('local')
+                self.send_json(200, {'status': 'ok', 'data': res})
+            else:
+                self.send_json(400, {'status': 'error', 'error': res.get('error', 'Import failed'), 'data': res})
+            return
+
+        # POST /panel/api/subscriptions -> add subscription
+        if method == 'POST' and len(parts) == 0:
+            name = payload.get('name')
+            if not name:
+                self.send_json(400, {'status': 'error', 'error': "Missing required field 'name'"})
+                return
+            url = payload.get('url')
+            raw_content = payload.get('raw_content') or payload.get('content')
+            sub_type = payload.get('type', 'remote' if url else 'raw')
+            exclude_filter = payload.get('exclude_filter')
+            enabled = payload.get('enabled', True)
+
+            res = engine.add_subscription(
+                name=name,
+                url=url,
+                sub_type=sub_type,
+                raw_content=raw_content,
+                exclude_filter=exclude_filter,
+                enabled=enabled,
+            )
+            if res.get('success'):
+                cache_invalidate('local')
+                self.send_json(200, {'status': 'ok', 'data': res})
+            else:
+                self.send_json(400, {'status': 'error', 'error': res.get('error', 'Add failed'), 'data': res})
+            return
+
+        # POST /panel/api/subscriptions/<sub_id>/update
+        if method == 'POST' and len(parts) == 2 and parts[1] == 'update':
+            sub_id = parts[0]
+            name = payload.get('name')
+            url = payload.get('url')
+            raw_content = payload.get('raw_content')
+            exclude_filter = payload.get('exclude_filter')
+            enabled = payload.get('enabled')
+            refresh = payload.get('refresh', True)
+
+            res = engine.update_subscription(
+                sub_id=sub_id,
+                name=name,
+                url=url,
+                raw_content=raw_content,
+                exclude_filter=exclude_filter,
+                enabled=enabled,
+                refresh=refresh,
+            )
+            if res.get('success'):
+                cache_invalidate('local')
+                self.send_json(200, {'status': 'ok', 'data': res})
+            else:
+                self.send_json(404 if 'not found' in res.get('error', '').lower() else 400, {
+                    'status': 'error',
+                    'error': res.get('error', 'Update failed'),
+                    'data': res,
+                })
+            return
+
+        # POST /panel/api/subscriptions/<sub_id>/toggle
+        if method == 'POST' and len(parts) == 2 and parts[1] == 'toggle':
+            sub_id = parts[0]
+            subs = engine.list_subscriptions()
+            sub = next((s for s in subs if s.get('id') == sub_id), None)
+            if not sub:
+                self.send_json(404, {'status': 'error', 'error': f"Subscription '{sub_id}' not found"})
+                return
+
+            new_enabled = not sub.get('enabled', True)
+            if 'enabled' in payload:
+                new_enabled = bool(payload['enabled'])
+
+            res = engine.update_subscription(
+                sub_id=sub_id,
+                enabled=new_enabled,
+                refresh=False,
+            )
+            if res.get('success'):
+                cache_invalidate('local')
+                self.send_json(200, {'status': 'ok', 'data': res})
+            else:
+                self.send_json(400, {'status': 'error', 'error': res.get('error', 'Toggle failed'), 'data': res})
+            return
+
+        # DELETE /panel/api/subscriptions/<sub_id>
+        if method == 'DELETE' and len(parts) == 1:
+            sub_id = parts[0]
+            res = engine.delete_subscription(sub_id)
+            if res.get('success'):
+                cache_invalidate('local')
+                self.send_json(200, {'status': 'ok', 'data': res})
+            else:
+                self.send_json(404, {'status': 'error', 'error': res.get('error', 'Delete failed'), 'data': res})
+            return
+
+        self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed for path {rel_path}'})
+
+    def _handle_diagnostics(self, method: str, rel_path: str):
+        if not self._is_authenticated():
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.send_header('WWW-Authenticate', 'Bearer')
+            self.end_headers()
+            return
+
+        subpath = rel_path[len('/panel/api/diagnostics'):].strip('/')
+        if subpath == 'egress-ip' and method == 'GET':
+            query_params = parse_qs(urlsplit(self.path).query)
+            proxy_port_str = query_params.get('proxy_port', ['7897'])[0]
+            use_proxy_str = query_params.get('proxy', ['true'])[0].lower()
+            use_proxy = use_proxy_str not in ('false', '0', 'no')
+            proxy_port = int(proxy_port_str) if proxy_port_str.isdigit() else 7897
+
+            # Probe targets for multi-source race detection
+            sources = [
+                {'name': 'ipinfo.io', 'url': 'https://ipinfo.io/json', 'type': 'json'},
+                {'name': 'cloudflare', 'url': 'https://cloudflare.com/cdn-cgi/trace', 'type': 'trace'},
+                {'name': 'api.ipify.org', 'url': 'https://api.ipify.org?format=json', 'type': 'json'},
+                {'name': 'ip-api.com', 'url': 'http://ip-api.com/json', 'type': 'json'},
+            ]
+
+            def probe(src):
+                start_t = time.perf_counter()
+                try:
+                    parsed_info = _probe_egress_source(src, timeout=3.5, use_proxy=use_proxy, proxy_port=proxy_port)
+                    latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
+                    if parsed_info and parsed_info.get('ip'):
+                        return {
+                            'source': src['name'],
+                            'latency_ms': latency_ms,
+                            'data': parsed_info,
+                        }
+                except Exception:
+                    pass
+                return None
+
+            results = []
+            futures = [DIAGNOSTICS_EXECUTOR.submit(probe, src) for src in sources]
+            try:
+                for future in concurrent.futures.as_completed(futures, timeout=3.5):
+                    res = future.result()
+                    if res:
+                        results.append(res)
+            except TimeoutError:
+                pass
+            except Exception:
+                pass
+
+            if not results:
+                self.send_json(200, {
+                    'status': 'ok',
+                    'data': {
+                        'success': False,
+                        'message': 'All egress probes failed or timed out. Proxy may be offline.',
+                        'use_proxy': use_proxy,
+                        'proxy_port': proxy_port,
+                        'fastest': None,
+                        'all_results': [],
+                    }
+                })
+                return
+
+            results.sort(key=lambda x: x['latency_ms'])
+            fastest = results[0]
+
+            self.send_json(200, {
+                'status': 'ok',
+                'data': {
+                    'success': True,
+                    'use_proxy': use_proxy,
+                    'proxy_port': proxy_port,
+                    'fastest': fastest,
+                    'all_results': results,
+                }
+            })
+            return
+
+        self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed for {rel_path}'})
+
+    def _handle_rules_simulate(self, method: str, rel_path: str):
+        if not self._is_authenticated():
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.send_header('WWW-Authenticate', 'Bearer')
+            self.end_headers()
+            return
+
+        if method != 'POST':
+            self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed'})
+            return
+
+        try:
+            reconciler = get_reconciler()
+        except ReconcilerLoadError as e:
+            self.send_json(500, {'status': 'error', 'error': f'Rules reconciler module failed to load: {e}'})
+            return
+        if not reconciler:
+            self.send_json(500, {'status': 'error', 'error': 'Rules reconciler module is unavailable'})
+            return
+
+        length = int(self.headers.get('Content-Length', '0'))
+        body_bytes = self.rfile.read(length) if length else b''
+        payload = {}
+        if body_bytes:
+            try:
+                payload = json.loads(body_bytes.decode('utf-8'))
+            except Exception as e:
+                self.send_json(400, {'status': 'error', 'error': f'Invalid JSON body: {e}'})
+                return
+
+        domain = payload.get('domain')
+        if not domain or not isinstance(domain, str):
+            self.send_json(400, {'status': 'error', 'error': "Missing or invalid required field 'domain'"})
+            return
+
+        config_path = Path(payload['config_path']) if payload.get('config_path') else None
+        res = reconciler.simulate_routing(domain.strip(), config_path)
+        self.send_json(200 if res.get('success') else 400, {'status': 'ok' if res.get('success') else 'error', 'data': res})
+        return
+
     def _handle_user_rules(self, method: str, rel_path: str):
-        if not authorized(self):
+        if not self._is_authenticated():
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.send_header('WWW-Authenticate', 'Bearer')
@@ -483,7 +851,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_json(405, {'error': f'Method {method} not allowed'})
 
     def _proxy(self, method: str, rel_path: str):
-        if not authorized(self):
+        if not self._is_authenticated():
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.send_header('WWW-Authenticate', 'Bearer')
@@ -574,7 +942,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(502, str(e))
 
     def _websocket(self, rel_path: str):
-        if not authorized(self):
+        if not self._is_authenticated():
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.end_headers()
@@ -624,7 +992,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             upstream.close()
 
     def _forward_remote_http(self, method: str, remote_ip: str, remote_port: int, remote_path_with_query: str, node: str):
-        if not authorized(self):
+        if not self._is_authenticated():
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.send_header('WWW-Authenticate', 'Bearer')
@@ -697,7 +1065,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(502, f"Remote gateway error ({remote_ip}:{remote_port}): {e}")
 
     def _forward_remote_ws(self, remote_ip: str, remote_port: int, remote_path_with_query: str):
-        if not authorized(self):
+        if not self._is_authenticated():
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.end_headers()
@@ -782,6 +1150,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
+
+        if rel_path.startswith('/panel/api/subscriptions'):
+            return self._handle_subscriptions(method, rel_path)
+
+        if rel_path.startswith('/panel/api/diagnostics'):
+            return self._handle_diagnostics(method, rel_path)
+
+        if rel_path.startswith('/panel/api/rules/simulate'):
+            return self._handle_rules_simulate(method, rel_path)
 
         if rel_path.startswith('/panel/api/user-rules'):
             return self._handle_user_rules(method, rel_path)

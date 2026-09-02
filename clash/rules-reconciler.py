@@ -23,7 +23,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
-ROOT = Path('/personal/clash')
+# ROOT configuration supporting CLASH_ROOT environment variable
+CLASH_ROOT_ENV = os.environ.get('CLASH_ROOT')
+ROOT = Path(CLASH_ROOT_ENV).resolve() if CLASH_ROOT_ENV else Path('/personal/clash')
 RULES_FILE = ROOT / 'rules/user-rules.yaml'
 TARGETS = (ROOT / 'config.mac-merged.yaml', ROOT / 'config.yaml')
 SECRET_FILE = ROOT / '.controller-secret'
@@ -40,6 +42,22 @@ VALID_RULE_TYPES = {
     'PROCESS-NAME',
     'GEOSITE',
     'GEOIP',
+    'DST-PORT',
+    'SRC-PORT',
+    'IN-TYPE',
+    'AND',
+    'OR',
+    'NOT',
+}
+
+ADVANCED_RULE_TYPES = {
+    'DST-PORT',
+    'SRC-PORT',
+    'IN-TYPE',
+    'PROCESS-NAME',
+    'AND',
+    'OR',
+    'NOT',
 }
 
 BUILTIN_TARGETS = {'DIRECT', 'REJECT', 'GLOBAL'}
@@ -58,12 +76,13 @@ def get_controller_secret() -> str:
     return ''
 
 
-def get_available_targets(target_path: Path = ROOT / 'config.yaml') -> Set[str]:
+def get_available_targets(target_path: Optional[Path] = None) -> Set[str]:
     targets = set(BUILTIN_TARGETS)
-    if not target_path.exists():
+    tp = target_path if target_path is not None else ROOT / 'config.yaml'
+    if not tp.exists():
         return targets
     try:
-        data = yaml.safe_load(target_path.read_text()) or {}
+        data = yaml.safe_load(tp.read_text()) or {}
         for g in data.get('proxy-groups', []):
             if isinstance(g, dict) and 'name' in g:
                 targets.add(g['name'])
@@ -391,6 +410,286 @@ def add_or_update_rule(rule_dict: Dict[str, Any]) -> Dict[str, Any]:
         lock_fd.close()
 
 
+def parse_rule_line(line: str) -> Optional[Dict[str, Any]]:
+    """Parse a Mihomo rule line into components.
+    
+    Supports:
+      RULE-TYPE,payload,target[,params...]
+      MATCH,target
+      AND,((...),...),target
+    """
+    raw = line.strip()
+    if not raw or raw.startswith('#'):
+        return None
+    parts = [p.strip() for p in raw.split(',')]
+    if not parts:
+        return None
+    rule_type = parts[0].upper()
+    if rule_type == 'MATCH':
+        target = parts[1] if len(parts) > 1 else 'DIRECT'
+        return {'type': 'MATCH', 'payload': '', 'target': target, 'raw': raw, 'is_advanced': False}
+    if len(parts) < 3:
+        # Check if it might be an advanced compound rule like AND/OR/NOT
+        if rule_type in ADVANCED_RULE_TYPES and len(parts) >= 2:
+            return {
+                'type': rule_type,
+                'payload': ','.join(parts[1:-1]) if len(parts) > 2 else parts[1],
+                'target': parts[-1] if len(parts) > 2 else 'DIRECT',
+                'params': [],
+                'raw': raw,
+                'is_advanced': True,
+            }
+        return None
+    payload = parts[1]
+    target = parts[2]
+    params = parts[3:] if len(parts) > 3 else []
+    return {
+        'type': rule_type,
+        'payload': payload,
+        'target': target,
+        'params': params,
+        'raw': raw,
+        'is_advanced': rule_type in ADVANCED_RULE_TYPES,
+    }
+
+
+GEOSITE_HEURISTICS = {
+    'cn': ('.cn', 'baidu', 'qq.com', '163.com', 'aliyun', 'taobao', 'alipay', 'bilibili', 'zhihu', 'weibo', 'jd.com', 'douyin', 'bytedance', 'sina', 'sohu', 'tencent'),
+    'china': ('.cn', 'baidu', 'qq.com', '163.com', 'aliyun', 'taobao', 'alipay', 'bilibili', 'zhihu', 'weibo'),
+    'openai': ('openai', 'chatgpt', 'oaistatic', 'oaiusercontent'),
+    'claude': ('claude', 'anthropic'),
+    'anthropic': ('claude', 'anthropic'),
+    'google': ('google', 'youtube', 'gmail', 'gstatic', 'android', 'gvt1', 'ggpht'),
+    'github': ('github', 'githubusercontent', 'ghcr.io'),
+    'telegram': ('telegram', 't.me', 'tdesktop'),
+    'twitter': ('twitter', 't.co', 'twimg', 'x.com'),
+    'facebook': ('facebook', 'fbcdn', 'instagram', 'whatsapp', 'meta'),
+    'meta': ('facebook', 'fbcdn', 'instagram', 'whatsapp', 'meta'),
+    'category-ads-all': ('adservice', 'googleads', 'doubleclick', 'analytics', 'telemetry', 'ads'),
+    'gfw': ('google', 'youtube', 'twitter', 'facebook', 'openai', 'claude', 'chatgpt', 'github', 'telegram', 'instagram', 'netflix', 'spotify', 'medium', 'wikipedia', 'discord', 'docker', 'huggingface'),
+    'geolocation-!cn': ('google', 'youtube', 'twitter', 'facebook', 'openai', 'claude', 'chatgpt', 'github', 'telegram', 'instagram', 'netflix', 'spotify', 'medium', 'wikipedia', 'discord', 'docker', 'huggingface'),
+}
+DOMESTIC_DNS_SERVERS = {
+    '223.5.5.5', '223.6.6.6',
+    '114.114.114.114', '114.114.115.115',
+    '119.29.29.29', '182.254.116.116',
+    '180.76.76.76',
+    'https://dns.alidns.com/dns-query', 'tls://dns.alidns.com',
+    'https://doh.pub/dns-query', 'tls://dot.pub',
+}
+
+OVERSEAS_SENSITIVE_KEYWORDS = [
+    'openai', 'claude', 'anthropic', 'chatgpt', 'github', 'googleapis',
+    'google', 'youtube', 'twitter', 'x.com', 'facebook', 'instagram',
+    'telegram', 'netflix', 'spotify', 'wikipedia', 'medium', 'notion',
+    'discord', 'docker', 'huggingface', 'cursor', 'copilot'
+]
+
+
+def simulate_dns(domain: str, dns_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Simulate DNS resolution policy matching and check for DNS pollution risks."""
+    nameserver_policy = dns_config.get('nameserver-policy', {}) or {}
+    matched_policy_rule = None
+    matched_dns_servers = []
+
+    # Match nameserver-policy. Format can be:
+    # 'geosite:category': '1.1.1.1'
+    # '+.google.com': '8.8.8.8'
+    # 'domain.com': ['1.1.1.1', '8.8.8.8']
+    # 'regex:.*': '...'
+    domain_lower = domain.lower()
+    
+    # 1. Exact match / wildcard suffix match in nameserver-policy
+    for pattern, servers in nameserver_policy.items():
+        pat = pattern.strip()
+        matched = False
+        if pat.startswith('+.'):
+            suffix = pat[2:].lower()
+            if domain_lower == suffix or domain_lower.endswith('.' + suffix):
+                matched = True
+        elif pat.startswith('*.'):
+            suffix = pat[2:].lower()
+            if domain_lower.endswith('.' + suffix):
+                matched = True
+        elif pat.startswith('geosite:'):
+            # GEOSITE match in nameserver policy
+            geosite_name = pat[8:].lower()
+            if geosite_name in domain_lower:
+                matched = True
+        else:
+            if domain_lower == pat.lower() or domain_lower.endswith('.' + pat.lower()):
+                matched = True
+        
+        if matched:
+            matched_policy_rule = pattern
+            matched_dns_servers = servers if isinstance(servers, list) else [servers]
+            break
+
+    if not matched_dns_servers:
+        default_nameservers = dns_config.get('nameserver', ['114.114.114.114', '223.5.5.5'])
+        if not isinstance(default_nameservers, list):
+            default_nameservers = [default_nameservers]
+        matched_dns_servers = default_nameservers
+
+    # Pollution risk detection
+    is_sensitive = any(kw in domain_lower for kw in OVERSEAS_SENSITIVE_KEYWORDS)
+    has_domestic_dns = any(
+        any(d in str(srv) for d in DOMESTIC_DNS_SERVERS)
+        for srv in matched_dns_servers
+    )
+
+    warnings = []
+    if is_sensitive and has_domestic_dns:
+        warnings.append(
+            f"DNS pollution risk: sensitive/overseas domain '{domain}' is resolved by domestic DNS server(s): {matched_dns_servers}. "
+            "Consider routing DNS queries for this domain to a secure foreign or encrypted DNS server."
+        )
+
+    return {
+        'policy_rule': matched_policy_rule,
+        'nameservers': matched_dns_servers,
+        'warnings': warnings,
+    }
+
+
+def simulate_routing(domain: str, config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Simulate Mihomo routing rules and DNS nameserver policy matching for a given domain/IP."""
+    clash_base = Path(os.environ.get('CLASH_ROOT')).resolve() if os.environ.get('CLASH_ROOT') else ROOT
+    target_path = config_path
+    if not target_path:
+        candidates = (clash_base / 'config.mac-merged.yaml', clash_base / 'config.yaml')
+        for candidate in candidates:
+            if candidate.exists():
+                target_path = candidate
+                break
+        if not target_path:
+            target_path = clash_base / 'config.yaml'
+
+    config_data: Dict[str, Any] = {}
+    if target_path.exists():
+        try:
+            config_data = yaml.safe_load(target_path.read_text()) or {}
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"Failed to load config {target_path}: {e}",
+                'domain': domain,
+            }
+
+    raw_rules = config_data.get('rules', [])
+    dns_config = config_data.get('dns', {}) or {}
+
+    domain_clean = domain.strip().lower()
+    
+    # Check if target is an IP address
+    is_ip = False
+    ip_obj = None
+    try:
+        ip_obj = ipaddress.ip_address(domain_clean)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+
+    parsed_rules = []
+    skipped_advanced_rules = []
+    for idx, r in enumerate(raw_rules):
+        parsed = parse_rule_line(str(r))
+        if parsed:
+            parsed['index'] = idx
+            parsed_rules.append(parsed)
+            if parsed.get('is_advanced'):
+                skipped_advanced_rules.append({
+                    'index': idx,
+                    'type': parsed['type'],
+                    'payload': parsed['payload'],
+                    'target': parsed['target'],
+                    'raw': parsed['raw'],
+                    'reason': f"Non-basic rule type '{parsed['type']}' is not evaluated in static domain/IP simulation.",
+                })
+
+    matched_rule = None
+
+    # Step-by-step rule simulation according to standard Mihomo rule matching order:
+    # 1. DOMAIN
+    # 2. DOMAIN-SUFFIX
+    # 3. DOMAIN-KEYWORD
+    # 4. IP-CIDR / IP-CIDR6 (if IP)
+    # 5. GEOSITE
+    # 6. GEOIP (if IP or heuristic)
+    # 7. MATCH (fallback)
+    
+    # In Mihomo, rules in the config are actually evaluated in sequential order from top to bottom.
+    # However, each rule matches according to its semantic type.
+    # Let's evaluate in sequential order as Mihomo executes!
+    for r in parsed_rules:
+        rtype = r['type']
+        payload = r['payload'].lower()
+        
+        if rtype == 'DOMAIN':
+            if not is_ip and domain_clean == payload:
+                matched_rule = r
+                break
+        elif rtype == 'DOMAIN-SUFFIX':
+            if not is_ip and (domain_clean == payload or domain_clean.endswith('.' + payload)):
+                matched_rule = r
+                break
+        elif rtype == 'DOMAIN-KEYWORD':
+            if not is_ip and payload in domain_clean:
+                matched_rule = r
+                break
+        elif rtype in ('IP-CIDR', 'IP-CIDR6'):
+            if is_ip and ip_obj:
+                try:
+                    net = ipaddress.ip_network(payload, strict=False)
+                    if ip_obj in net:
+                        matched_rule = r
+                        break
+                except Exception:
+                    pass
+        elif rtype == 'GEOSITE':
+            # Simulated heuristic for GEOSITE
+            site_cat = payload.lower()
+            heuristics = GEOSITE_HEURISTICS.get(site_cat, (site_cat,))
+            if any(h in domain_clean for h in heuristics):
+                matched_rule = r
+                break
+        elif rtype == 'GEOIP':
+            if is_ip and ip_obj:
+                # Private IP heuristic vs public
+                if payload.upper() == 'CN' and (ip_obj.is_private or str(ip_obj).startswith('223.') or str(ip_obj).startswith('114.')):
+                    matched_rule = r
+                    break
+        elif rtype == 'MATCH':
+            matched_rule = r
+            break
+
+    if not matched_rule:
+        matched_rule = {'type': 'DEFAULT', 'payload': '', 'target': 'DIRECT', 'raw': 'DEFAULT,DIRECT'}
+
+    dns_sim = simulate_dns(domain_clean, dns_config) if not is_ip else {
+        'policy_rule': None,
+        'nameservers': [],
+        'warnings': [],
+    }
+
+    return {
+        'success': True,
+        'domain': domain,
+        'is_ip': is_ip,
+        'config_file': str(target_path),
+        'matched_rule': {
+            'type': matched_rule.get('type'),
+            'payload': matched_rule.get('payload'),
+            'target': matched_rule.get('target'),
+            'params': matched_rule.get('params', []),
+            'raw': matched_rule.get('raw'),
+            'index': matched_rule.get('index', -1),
+        },
+        'dns': dns_sim,
+        'skipped_advanced_rules': skipped_advanced_rules,
+    }
+
+
 def delete_rule(rule_id: str) -> Dict[str, Any]:
     lock_fd = get_lock()
     try:
@@ -422,7 +721,15 @@ if __name__ == '__main__':
     parser.add_argument('--reconcile', action='store_true', help='Reconcile user-rules.yaml into clash configs')
     parser.add_argument('--dry-run', action='store_true', help='Check and test candidate configs without writing')
     parser.add_argument('--list-targets', action='store_true', help='List allowed targets')
+    parser.add_argument('--simulate', type=str, metavar='DOMAIN', help='Simulate routing and DNS policy for a domain/IP')
+    parser.add_argument('--config', type=str, metavar='PATH', help='Specify config file for simulation')
     args = parser.parse_args()
+
+    if args.simulate:
+        cfg_path = Path(args.config) if args.config else None
+        res = simulate_routing(args.simulate, cfg_path)
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        sys.exit(0 if res.get('success') else 1)
 
     if args.list_targets:
         targets = sorted(get_available_targets())
