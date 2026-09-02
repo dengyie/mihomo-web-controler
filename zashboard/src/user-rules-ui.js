@@ -314,47 +314,47 @@
     let pill = document.getElementById('zashboard-floating-egress-pill');
     if (!pill) return;
 
+    let newHtml = '';
     if (egressBadgeState.loading) {
-      pill.innerHTML = `
+      newHtml = `
         <span class="loading loading-spinner loading-xs text-primary"></span>
         <span class="opacity-80">探测出口...</span>
       `;
-      return;
-    }
-
-    if (egressBadgeState.error) {
-      pill.innerHTML = `
+    } else if (egressBadgeState.error) {
+      newHtml = `
         <span class="text-error font-bold">⚠️</span>
         <span class="text-error text-xs">出口异常</span>
         <span class="badge badge-xs badge-ghost ml-1">重试</span>
       `;
-      return;
+    } else {
+      const fastest = egressBadgeState.data?.fastest;
+      if (!fastest || !fastest.data) {
+        newHtml = `
+          <span>🌐</span>
+          <span class="opacity-80">测速出口 IP</span>
+        `;
+      } else {
+        const ipData = fastest.data;
+        const ip = ipData.ip || 'Unknown';
+        const flag = getFlagEmoji(ipData.country_code);
+        const latency = Math.round(fastest.latency_ms || 0);
+
+        let latencyBadge = 'badge-success';
+        if (latency > 300) latencyBadge = 'badge-error';
+        else if (latency > 150) latencyBadge = 'badge-warning';
+
+        newHtml = `
+          <span class="text-base">${flag}</span>
+          <span class="font-bold text-xs">${escapeHtml(ip)}</span>
+          <span class="badge badge-xs ${latencyBadge} font-mono">${latency}ms</span>
+          <span class="text-[10px] opacity-40 hover:opacity-100 ml-0.5" title="点击前往网络工具箱">➔</span>
+        `;
+      }
     }
 
-    const fastest = egressBadgeState.data?.fastest;
-    if (!fastest || !fastest.data) {
-      pill.innerHTML = `
-        <span>🌐</span>
-        <span class="opacity-80">测速出口 IP</span>
-      `;
-      return;
+    if (pill.innerHTML.trim() !== newHtml.trim()) {
+      pill.innerHTML = newHtml;
     }
-
-    const ipData = fastest.data;
-    const ip = ipData.ip || 'Unknown';
-    const flag = getFlagEmoji(ipData.country_code);
-    const latency = Math.round(fastest.latency_ms || 0);
-
-    let latencyBadge = 'badge-success';
-    if (latency > 300) latencyBadge = 'badge-error';
-    else if (latency > 150) latencyBadge = 'badge-warning';
-
-    pill.innerHTML = `
-      <span class="text-base">${flag}</span>
-      <span class="font-bold text-xs">${escapeHtml(ip)}</span>
-      <span class="badge badge-xs ${latencyBadge} font-mono">${latency}ms</span>
-      <span class="text-[10px] opacity-40 hover:opacity-100 ml-0.5" title="点击前往网络工具箱">➔</span>
-    `;
   }
 
   function injectFloatingEgressPill() {
@@ -1058,8 +1058,9 @@
   }
 
   // ==========================================
-  // 6. 路由管理与页面切换调度
+  // 6. 路由管理与页面切换调度 (严格幂等，避免无谓重绘)
   // ==========================================
+  let lastRouteWasToolkit = false;
   function syncRouteView() {
     const isToolkit = isToolkitRoute();
 
@@ -1073,13 +1074,15 @@
     let toolkitView = document.getElementById('zashboard-toolkit-view');
 
     if (isToolkit) {
-      // 激活工具箱页面：隐藏原生 SPA 的其他子元素
       if (mainArea) {
-        Array.from(mainArea.children).forEach((child) => {
-          if (child.id !== 'zashboard-toolkit-view') {
-            child.style.display = 'none';
-          }
-        });
+        // 只在初次切入或子元素未隐藏时遍历
+        if (!lastRouteWasToolkit || (toolkitView && toolkitView.style.display === 'none')) {
+          Array.from(mainArea.children).forEach((child) => {
+            if (child.id !== 'zashboard-toolkit-view') {
+              child.style.display = 'none';
+            }
+          });
+        }
 
         if (!toolkitView) {
           toolkitView = document.createElement('div');
@@ -1091,21 +1094,27 @@
           fetchSubscriptions();
         }
         toolkitView.style.display = 'block';
-        renderToolkitPage();
+        if (!lastRouteWasToolkit) {
+          renderToolkitPage();
+        }
       }
+      lastRouteWasToolkit = true;
     } else {
       // 切回原生页面（如 Overview, Proxies, Rules 等）
-      if (toolkitView) {
-        toolkitView.style.display = 'none';
-      }
-      if (mainArea) {
-        Array.from(mainArea.children).forEach((child) => {
-          if (child.id !== 'zashboard-toolkit-view') {
-            if (child.style.display === 'none') {
-              child.style.display = '';
+      if (lastRouteWasToolkit) {
+        if (toolkitView) {
+          toolkitView.style.display = 'none';
+        }
+        if (mainArea) {
+          Array.from(mainArea.children).forEach((child) => {
+            if (child.id !== 'zashboard-toolkit-view') {
+              if (child.style.display === 'none') {
+                child.style.display = '';
+              }
             }
-          }
-        });
+          });
+        }
+        lastRouteWasToolkit = false;
       }
     }
 
@@ -1122,14 +1131,21 @@
     const a = sidebarItem.querySelector('a');
     if (!a) return;
 
+    const activeCls = 'sidebar-tab-active justify-center relative z-10 py-2';
+    const inactiveCls = 'hover:bg-base-300! justify-center relative z-10 py-2';
+
     if (isToolkit) {
-      a.className = 'sidebar-tab-active justify-center relative z-10 py-2';
+      if (a.className !== activeCls) {
+        a.className = activeCls;
+      }
       // 移除原生菜单项的激活类，避免双高亮
       document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) a.sidebar-tab-active').forEach((el) => {
-        el.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+        el.className = inactiveCls;
       });
     } else {
-      a.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+      if (a.className !== inactiveCls) {
+        a.className = inactiveCls;
+      }
     }
   }
 
@@ -1422,25 +1438,30 @@
   }
 
   // ==========================================
-  // 10. 全局调度主循环
+  // 10. 全局调度主循环 (纯驱动，彻底移除死循环 MutationObserver)
   // ==========================================
+  let isLoopRunning = false;
   function mainLoop() {
-    checkBackendChange();
-    injectSidebarItem();
-    injectFloatingEgressPill();
-    syncRouteView();
-    injectRulesPageButton();
+    if (isLoopRunning) return;
+    isLoopRunning = true;
+    try {
+      checkBackendChange();
+      injectSidebarItem();
+      injectFloatingEgressPill();
+      syncRouteView();
+      injectRulesPageButton();
+    } finally {
+      isLoopRunning = false;
+    }
   }
 
-  // DOM 观察与全局事件监听
-  const observer = new MutationObserver(() => {
-    mainLoop();
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
-
   window.addEventListener('hashchange', mainLoop);
-  setInterval(mainLoop, 400);
+  setInterval(mainLoop, 500);
 
-  // 立即触发一次
-  mainLoop();
+  // 页面就绪后立即触发
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mainLoop);
+  } else {
+    mainLoop();
+  }
 })();
