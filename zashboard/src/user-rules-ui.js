@@ -408,7 +408,9 @@
       item.setAttribute('data-sidebar-route', 'toolkit');
       item.innerHTML = `
         <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/proxies?tab=toolkit">
-          ${uiIcon('tool', { size: 20 })}
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" data-slot="icon" class="h-5 w-5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.32l-3.232 3.232a1.875 1.875 0 0 1-2.652-2.652L21 3.232A4.5 4.5 0 0 0 14.68 7.72c.047.58.024 1.192-.14 1.742m0 0a4.872 4.872 0 0 1-1.42 2.496l-3.03 2.496"></path>
+          </svg>
         </a>
       `;
 
@@ -421,6 +423,11 @@
         syncToolkitView();
       }, true);
 
+      // hover 到 toolkit 项时同步指示器
+      item.addEventListener('mouseenter', () => {
+        syncSidebarActive(true);
+      });
+
       // 插入在设置（最后一个）之前
       const lastLi = menuUl.lastElementChild;
       if (lastLi && menuUl.children.length >= 4) {
@@ -428,6 +435,16 @@
       } else {
         menuUl.appendChild(item);
       }
+    }
+
+    // 监听整个侧边栏 mouseleave，在处于 toolkit 时复位 indicator
+    if (!menuUl.dataset.toolkitListenerAttached) {
+      menuUl.dataset.toolkitListenerAttached = 'true';
+      menuUl.addEventListener('mouseleave', () => {
+        if (isToolkitRoute()) {
+          setTimeout(() => syncSidebarActive(true), 50);
+        }
+      });
     }
 
     syncSidebarActive(isToolkitRoute());
@@ -438,26 +455,33 @@
     if (!item) return;
     const a = item.querySelector('a');
     const indicator = document.querySelector('.sidebar-tab-indicator');
+    const menuUl = document.querySelector('ul.sidebar-route-menu');
 
     if (isToolkit) {
-      if (a) a.className = 'sidebar-tab-active justify-center relative z-10 py-2';
-      // 移除原生菜单项的 active 类
-      document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) a.sidebar-tab-active').forEach((el) => {
-        el.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+      if (a) {
+        a.classList.add('sidebar-tab-active');
+        a.classList.remove('hover:bg-base-300!');
+      }
+      // 清除其它原生菜单项的 sidebar-tab-active，避免双重高亮
+      document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) > a').forEach((el) => {
+        el.classList.remove('sidebar-tab-active');
+        el.classList.add('hover:bg-base-300!');
       });
 
-      // 动态同步滑块指示器位置 (每个 li 占 36px 高度)
-      if (indicator) {
-        const itemRect = item.getBoundingClientRect();
-        const menuRect = item.parentElement.getBoundingClientRect();
-        const topOffset = Math.round(itemRect.top - menuRect.top + 8);
-        indicator.style.transform = `translate3d(8px, ${topOffset}px, 0px)`;
-        indicator.style.height = '36px';
+      // 采用与 Vue SideBar 完全一致的相对物理坐标算法
+      if (indicator && menuUl && a) {
+        const r = menuUl.getBoundingClientRect();
+        const o = a.getBoundingClientRect();
+        indicator.style.transform = `translate3d(${Math.round(o.left - r.left)}px, ${Math.round(o.top - r.top)}px, 0px)`;
+        indicator.style.width = `${Math.round(o.width)}px`;
+        indicator.style.height = `${Math.round(o.height)}px`;
         indicator.style.opacity = '1';
-        indicator.style.width = '56px';
       }
     } else {
-      if (a) a.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+      if (a) {
+        a.classList.remove('sidebar-tab-active');
+        a.classList.add('hover:bg-base-300!');
+      }
     }
   }
 
