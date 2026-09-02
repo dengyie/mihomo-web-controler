@@ -1,4 +1,4 @@
-// zashboard 自定义规则管理、独立工具箱页面与网络聚合套件
+// zashboard 自定义规则管理、独立工具箱子页面与网络聚合套件
 // 源码: zashboard/src/user-rules-ui.js
 // 构建脚本: scripts/build-ui.mjs -> zashboard/dist/assets/user-rules-ui.js
 (function () {
@@ -79,7 +79,6 @@
     loading: false,
     error: null,
     list: [],
-    modalOpen: false,
     addFormVisible: false,
     activeTab: 'sub', // 'sub' or 'nodes'
     subInputName: '',
@@ -100,51 +99,9 @@
 
   // 用户自定义规则状态
   let userRulesState = {
-    open: false,
     rules: [],
     loading: false,
-    submitting: false,
-    error: null,
-    successMsg: null,
-    newRuleType: 'DOMAIN-SUFFIX',
-    newRulePayload: '',
-    newRuleTarget: 'DIRECT',
-    newRuleComment: '',
-    proxyGroups: [],
-    searchKeyword: '',
-    activeTab: 'rules',
   };
-
-  // ==========================================
-  // CSS 样式注入 (标准 DaisyUI 风格加固)
-  // ==========================================
-  const STYLE_ID = 'zashboard-toolkit-modal-styles';
-  function injectStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-    .ur-modal-backdrop {
-      animation: urFadeIn 0.15s ease-out;
-    }
-    @keyframes urFadeIn {
-      from { opacity: 0; transform: scale(0.98); }
-      to { opacity: 1; transform: scale(1); }
-    }
-    .custom-scrollbar::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
-    .custom-scrollbar::-webkit-scrollbar-thumb {
-      background: rgba(120, 120, 120, 0.3);
-      border-radius: 3px;
-    }
-    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-      background: rgba(120, 120, 120, 0.5);
-    }
-    `;
-    document.head.appendChild(style);
-  }
 
   // ==========================================
   // 凭证与后端识别
@@ -194,7 +151,7 @@
   }
 
   // ==========================================
-  // 出口 IP 竞速诊断
+  // API 请求函数
   // ==========================================
   async function fetchEgressIp(force = false) {
     const now = Date.now();
@@ -202,15 +159,13 @@
       return;
     }
     egressBadgeState.loading = true;
-    renderToolkitModalContent();
+    renderToolkitSubpage();
 
     try {
       const resp = await fetch(`${getApiBase()}/diagnostics/egress-ip`, {
         headers: getAuthHeaders(),
       });
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
-      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
       if (json.status === 'ok') {
         egressBadgeState.data = json.data;
@@ -223,16 +178,13 @@
       egressBadgeState.error = err.message || '网络连接异常';
     } finally {
       egressBadgeState.loading = false;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
-  // ==========================================
-  // 订阅与节点管理 API
-  // ==========================================
   async function fetchSubscriptions() {
     subscriptionState.loading = true;
-    renderToolkitModalContent();
+    renderToolkitSubpage();
 
     try {
       const resp = await fetch(`${getApiBase()}/subscriptions`, {
@@ -250,13 +202,13 @@
       subscriptionState.error = err.message || '无法获取订阅列表';
     } finally {
       subscriptionState.loading = false;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
   async function addSubscriptionUrl(name, url, excludeFilter) {
     subscriptionState.actionInProgress = 'add-sub';
-    renderToolkitModalContent();
+    renderToolkitSubpage();
     try {
       const resp = await fetch(`${getApiBase()}/subscriptions`, {
         method: 'POST',
@@ -264,9 +216,7 @@
         body: JSON.stringify({ name, url, exclude_filter: excludeFilter }),
       });
       const json = await resp.json();
-      if (!resp.ok || json.status !== 'ok') {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       subscriptionState.addFormVisible = false;
       subscriptionState.subInputName = '';
       subscriptionState.subInputUrl = '';
@@ -276,13 +226,13 @@
       alert('添加订阅失败: ' + err.message);
     } finally {
       subscriptionState.actionInProgress = null;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
   async function importRawNodes(name, content) {
     subscriptionState.actionInProgress = 'import-nodes';
-    renderToolkitModalContent();
+    renderToolkitSubpage();
     try {
       const resp = await fetch(`${getApiBase()}/subscriptions/import-nodes`, {
         method: 'POST',
@@ -290,9 +240,7 @@
         body: JSON.stringify({ name, content }),
       });
       const json = await resp.json();
-      if (!resp.ok || json.status !== 'ok') {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       subscriptionState.addFormVisible = false;
       subscriptionState.nodesInputName = '';
       subscriptionState.nodesInputContent = '';
@@ -301,34 +249,32 @@
       alert('导入节点失败: ' + err.message);
     } finally {
       subscriptionState.actionInProgress = null;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
   async function updateSubscription(subId) {
     subscriptionState.actionInProgress = `update-${subId}`;
-    renderToolkitModalContent();
+    renderToolkitSubpage();
     try {
       const resp = await fetch(`${getApiBase()}/subscriptions/${encodeURIComponent(subId)}/update`, {
         method: 'POST',
         headers: getAuthHeaders(),
       });
       const json = await resp.json();
-      if (!resp.ok || json.status !== 'ok') {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
     } catch (err) {
       alert('更新订阅失败: ' + err.message);
     } finally {
       subscriptionState.actionInProgress = null;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
   async function toggleSubscription(subId, enabled) {
     subscriptionState.actionInProgress = `toggle-${subId}`;
-    renderToolkitModalContent();
+    renderToolkitSubpage();
     try {
       const resp = await fetch(`${getApiBase()}/subscriptions/${encodeURIComponent(subId)}`, {
         method: 'PATCH',
@@ -336,43 +282,36 @@
         body: JSON.stringify({ enabled }),
       });
       const json = await resp.json();
-      if (!resp.ok || json.status !== 'ok') {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
     } catch (err) {
       alert('切换状态失败: ' + err.message);
     } finally {
       subscriptionState.actionInProgress = null;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
   async function deleteSubscription(subId, name) {
     if (!confirm(`确定要删除订阅源 "${name}" 吗？其聚合节点将被同步移除。`)) return;
     subscriptionState.actionInProgress = `delete-${subId}`;
-    renderToolkitModalContent();
+    renderToolkitSubpage();
     try {
       const resp = await fetch(`${getApiBase()}/subscriptions/${encodeURIComponent(subId)}`, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
       const json = await resp.json();
-      if (!resp.ok || json.status !== 'ok') {
-        throw new Error(json.error || `HTTP ${resp.status}`);
-      }
+      if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
     } catch (err) {
       alert('删除失败: ' + err.message);
     } finally {
       subscriptionState.actionInProgress = null;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
-  // ==========================================
-  // 规则与 DNS 推演 API
-  // ==========================================
   async function runRuleSimulation(inputDomain) {
     const query = (inputDomain || ruleSimulatorState.input || '').trim();
     if (!query) {
@@ -384,7 +323,7 @@
     ruleSimulatorState.error = null;
     ruleSimulatorState.result = null;
     ruleSimulatorState.input = query;
-    renderToolkitModalContent();
+    renderToolkitSubpage();
 
     try {
       const resp = await fetch(`${getApiBase()}/rules/simulate?domain=${encodeURIComponent(query)}`, {
@@ -399,59 +338,132 @@
       ruleSimulatorState.error = err.message || '推演失败';
     } finally {
       ruleSimulatorState.loading = false;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     }
   }
 
   // ==========================================
-  // 工具箱 Modal 骨架与事件交互
+  // 子页面视图管理与原生切换 (View Switcher)
   // ==========================================
-  let isToolkitModalOpen = false;
+  function isToolkitRoute() {
+    const h = location.hash || '';
+    return h.startsWith('#/toolkit') || h.startsWith('#/subscriptions');
+  }
 
-  function openToolkitModal() {
-    isToolkitModalOpen = true;
-    let modal = document.getElementById('zashboard-toolkit-modal');
-    if (!modal) {
-      modal = document.createElement('dialog');
-      modal.id = 'zashboard-toolkit-modal';
-      modal.className = 'modal modal-bottom sm:modal-middle';
-      modal.innerHTML = `
-        <div class="modal-box max-w-5xl w-11/12 max-h-[90vh] p-4 md:p-6 bg-base-100 text-base-content shadow-2xl border border-base-300 custom-scrollbar flex flex-col relative">
-          <button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3 text-base-content/60 hover:text-base-content" id="btn-close-toolkit-modal" aria-label="关闭">
-            ${uiIcon('x', { size: 16 })}
-          </button>
-          <div id="zashboard-toolkit-modal-body" class="flex-1 overflow-y-auto custom-scrollbar pr-1"></div>
-        </div>
-        <form method="dialog" class="modal-backdrop">
-          <button id="btn-backdrop-close-toolkit">关闭</button>
-        </form>
+  function syncToolkitView() {
+    const isToolkit = isToolkitRoute();
+    const homePage = document.querySelector('.home-page');
+    if (!homePage || homePage.children.length < 2) return;
+
+    // 主内容区为 homePage 的第二个直接子元素 (relative flex-1 overflow-hidden)
+    const mainContainer = homePage.children[1];
+    let toolkitPage = document.getElementById('zashboard-toolkit-page');
+
+    if (isToolkit) {
+      // 隐藏原生页面（Overview / Proxies / Rules 等）的所有子 DOM
+      Array.from(mainContainer.children).forEach((child) => {
+        if (child.id !== 'zashboard-toolkit-page') {
+          child.style.display = 'none';
+        }
+      });
+
+      if (!toolkitPage) {
+        toolkitPage = document.createElement('div');
+        toolkitPage.id = 'zashboard-toolkit-page';
+        toolkitPage.className = 'absolute flex h-full w-full flex-col overflow-y-auto bg-base-100/50 p-4 md:p-6 custom-scrollbar';
+        mainContainer.appendChild(toolkitPage);
+        fetchEgressIp(false);
+        fetchSubscriptions();
+      }
+      toolkitPage.style.display = 'flex';
+      renderToolkitSubpage();
+    } else {
+      // 切回原生页面时，隐藏工具箱子页面，还原原生页面
+      if (toolkitPage) {
+        toolkitPage.style.display = 'none';
+      }
+      Array.from(mainContainer.children).forEach((child) => {
+        if (child.id !== 'zashboard-toolkit-page') {
+          if (child.style.display === 'none') {
+            child.style.display = '';
+          }
+        }
+      });
+    }
+
+    syncSidebarActive(isToolkit);
+  }
+
+  // ==========================================
+  // 侧边栏菜单项注入与指示器高亮同步
+  // ==========================================
+  function injectSidebarItem() {
+    const menuUl = document.querySelector('ul.sidebar-route-menu');
+    if (!menuUl) return;
+
+    let item = document.getElementById('sidebar-item-toolkit');
+    if (!item) {
+      item = document.createElement('li');
+      item.id = 'sidebar-item-toolkit';
+      item.setAttribute('data-sidebar-route', 'toolkit');
+      item.innerHTML = `
+        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/toolkit">
+          ${uiIcon('tool', { size: 20 })}
+        </a>
       `;
-      document.body.appendChild(modal);
 
-      modal.querySelector('#btn-close-toolkit-modal')?.addEventListener('click', closeToolkitModal);
-      modal.querySelector('#btn-backdrop-close-toolkit')?.addEventListener('click', closeToolkitModal);
+      item.querySelector('a')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        location.hash = '#/toolkit';
+        syncToolkitView();
+      });
+
+      // 插入在设置（最后一个）之前
+      const lastLi = menuUl.lastElementChild;
+      if (lastLi && menuUl.children.length >= 4) {
+        menuUl.insertBefore(item, lastLi);
+      } else {
+        menuUl.appendChild(item);
+      }
     }
 
-    modal.showModal();
-    fetchEgressIp(false);
-    fetchSubscriptions();
-    renderToolkitModalContent();
+    syncSidebarActive(isToolkitRoute());
   }
 
-  function closeToolkitModal() {
-    isToolkitModalOpen = false;
-    const modal = document.getElementById('zashboard-toolkit-modal');
-    if (modal && modal.open) {
-      modal.close();
+  function syncSidebarActive(isToolkit) {
+    const item = document.getElementById('sidebar-item-toolkit');
+    if (!item) return;
+    const a = item.querySelector('a');
+    const indicator = document.querySelector('.sidebar-tab-indicator');
+
+    if (isToolkit) {
+      if (a) a.className = 'sidebar-tab-active justify-center relative z-10 py-2';
+      // 移除原生菜单项的 active 类
+      document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) a.sidebar-tab-active').forEach((el) => {
+        el.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+      });
+
+      // 动态同步滑块指示器位置 (每个 li 占 36px 高度)
+      if (indicator) {
+        const itemRect = item.getBoundingClientRect();
+        const menuRect = item.parentElement.getBoundingClientRect();
+        const topOffset = Math.round(itemRect.top - menuRect.top + 8);
+        indicator.style.transform = `translate3d(8px, ${topOffset}px, 0px)`;
+        indicator.style.height = '36px';
+        indicator.style.opacity = '1';
+        indicator.style.width = '56px';
+      }
+    } else {
+      if (a) a.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
     }
   }
 
   // ==========================================
-  // 渲染工具箱 Modal 内容
+  // 渲染原生风格的独立子页面 (Subpage Rendering)
   // ==========================================
-  function renderToolkitModalContent() {
-    const body = document.getElementById('zashboard-toolkit-modal-body');
-    if (!body || !isToolkitModalOpen) return;
+  function renderToolkitSubpage() {
+    const pageContainer = document.getElementById('zashboard-toolkit-page');
+    if (!pageContainer || pageContainer.style.display === 'none') return;
 
     // 1. 出口 IP 视图构建
     const fastest = egressBadgeState.data?.fastest;
@@ -460,42 +472,42 @@
     const isEgressLoading = egressBadgeState.loading;
 
     let egressCardHtml = `
-      <div class="card bg-base-200/50 border border-base-300 p-4 mb-4">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div class="flex items-center gap-3">
-            <div class="p-2 rounded-lg bg-primary/10 text-primary">
-              ${uiIcon('globe', { size: 24 })}
+      <div class="card bg-base-200/60 border border-base-300 shadow-sm p-5 mb-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div class="flex items-center gap-4">
+            <div class="p-3 rounded-xl bg-primary/10 text-primary shrink-0">
+              ${uiIcon('globe', { size: 28 })}
             </div>
             <div>
-              <div class="flex items-center gap-2">
-                <span class="text-base font-bold font-mono">${escapeHtml(ipData?.ip || (isEgressLoading ? '正在竞速测速...' : '未获取'))}</span>
-                ${latency != null ? `<span class="badge badge-sm badge-success font-mono">${latency}ms</span>` : ''}
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-xl font-bold font-mono tracking-tight">${escapeHtml(ipData?.ip || (isEgressLoading ? '正在多源竞速测速...' : '未获取到有效出口'))}</span>
+                ${latency != null ? `<span class="badge badge-sm badge-success font-mono font-bold">${latency}ms</span>` : ''}
               </div>
-              <p class="text-xs text-base-content/60">
+              <p class="text-xs text-base-content/60 mt-0.5">
                 ${escapeHtml(ipData?.country || '')} ${escapeHtml(ipData?.city || '')}
-                ${ipData?.org ? `· <span class="font-mono">${escapeHtml(ipData.org)}</span>` : ''}
+                ${ipData?.org ? `· <span class="font-mono text-base-content/80">${escapeHtml(ipData.org)}</span>` : ''}
               </p>
             </div>
           </div>
           <div class="flex items-center gap-2 self-end sm:self-auto">
-            <button class="btn btn-xs btn-outline gap-1" id="btn-modal-reprobe-egress" ${isEgressLoading ? 'disabled' : ''}>
-              ${isEgressLoading ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('refresh', { size: 12 })} 重新测速
+            <button class="btn btn-sm btn-outline gap-1.5 font-normal" id="btn-reprobe-egress" ${isEgressLoading ? 'disabled' : ''}>
+              ${isEgressLoading ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('refresh', { size: 14 })} 重新测速
             </button>
-            <button class="btn btn-xs btn-ghost text-base-content/60 gap-1" id="btn-toggle-egress-details">
-              竞速明细 ${uiIcon('chevron-down', { size: 12 })}
+            <button class="btn btn-sm btn-ghost text-base-content/60 gap-1 font-normal" id="btn-toggle-egress-details">
+              竞速明细 ${uiIcon('chevron-down', { size: 14 })}
             </button>
           </div>
         </div>
 
-        <div id="egress-details-container" class="hidden mt-3 pt-3 border-t border-base-300/50">
-          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono">
+        <div id="egress-details-container" class="hidden mt-4 pt-4 border-t border-base-300/60">
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
             ${(egressBadgeState.data?.probes || []).map(p => `
-              <div class="p-2 rounded bg-base-100 border border-base-300/40">
-                <div class="flex justify-between font-bold">
-                  <span>${escapeHtml(p.source)}</span>
+              <div class="p-3 rounded-lg bg-base-100 border border-base-300/60 shadow-xs">
+                <div class="flex justify-between font-bold mb-1">
+                  <span class="text-base-content/80">${escapeHtml(p.source)}</span>
                   <span class="${p.success ? 'text-success' : 'text-error'}">${p.success ? `${Math.round(p.latency_ms)}ms` : '失败'}</span>
                 </div>
-                <div class="text-[10px] text-base-content/60 truncate mt-0.5">${escapeHtml(p.ip || p.error || 'N/A')}</div>
+                <div class="text-[11px] text-base-content/60 truncate">${escapeHtml(p.ip || p.error || 'N/A')}</div>
               </div>
             `).join('')}
           </div>
@@ -511,8 +523,8 @@
     if (subs.length === 0) {
       subsTableRows = `
         <tr>
-          <td colspan="5" class="text-center py-6 text-base-content/40 text-xs">
-            暂无已导入订阅源，点击右上角 "+ 添加源" 快速添加
+          <td colspan="4" class="text-center py-8 text-base-content/40 text-xs">
+            暂无已导入订阅源，点击上方 "+ 添加订阅源" 快速添加
           </td>
         </tr>
       `;
@@ -524,10 +536,10 @@
         const isDeleting = isAction === `delete-${s.id}`;
 
         return `
-          <tr class="hover:bg-base-200/40">
+          <tr class="hover:bg-base-200/40 transition-colors">
             <td>
               <div class="font-bold text-xs">${escapeHtml(s.name)}</div>
-              <div class="text-[10px] text-base-content/40 truncate max-w-xs font-mono">${escapeHtml(s.url || (s.type === 'raw' ? '单节点批量导入' : '本地源'))}</div>
+              <div class="text-[10px] text-base-content/40 truncate max-w-xs font-mono mt-0.5">${escapeHtml(s.url || (s.type === 'raw' ? '单节点批量导入' : '本地源'))}</div>
             </td>
             <td>
               <span class="badge badge-sm badge-ghost font-mono">${s.node_count || 0} 节点</span>
@@ -539,15 +551,15 @@
             </td>
             <td class="text-right space-x-1">
               ${s.type !== 'raw' ? `
-                <button class="btn btn-xs btn-ghost sub-btn-update" data-id="${escapeHtml(s.id)}" title="更新订阅" ${isUpdating ? 'disabled' : ''}>
-                  ${isUpdating ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('refresh', { size: 12 })}
+                <button class="btn btn-xs btn-ghost sub-btn-update" data-id="${escapeHtml(s.id)}" title="更新拉取" ${isUpdating ? 'disabled' : ''}>
+                  ${isUpdating ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('refresh', { size: 13 })}
                 </button>
               ` : ''}
               <button class="btn btn-xs btn-ghost sub-btn-toggle" data-id="${escapeHtml(s.id)}" data-enabled="${s.enabled}" title="${s.enabled ? '暂停' : '启用'}" ${isToggling ? 'disabled' : ''}>
-                ${uiIcon(s.enabled ? 'pause' : 'play', { size: 12 })}
+                ${uiIcon(s.enabled ? 'pause' : 'play', { size: 13 })}
               </button>
               <button class="btn btn-xs btn-ghost text-error sub-btn-delete" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" title="删除" ${isDeleting ? 'disabled' : ''}>
-                ${uiIcon('trash', { size: 12 })}
+                ${uiIcon('trash', { size: 13 })}
               </button>
             </td>
           </tr>
@@ -559,39 +571,39 @@
     if (subscriptionState.addFormVisible) {
       const isSubTab = subscriptionState.activeTab === 'sub';
       subAddFormHtml = `
-        <div class="bg-base-200/60 p-3 rounded-lg border border-base-300 mb-3 space-y-3">
+        <div class="bg-base-200/80 p-4 rounded-xl border border-base-300 mb-4 space-y-3 shadow-xs">
           <div class="flex items-center justify-between">
             <div class="tabs tabs-boxed bg-base-100 p-0.5">
-              <a class="tab tab-xs gap-1 ${isSubTab ? 'tab-active' : ''}" id="tab-switch-sub">
-                ${uiIcon('link', { size: 12 })} Clash 订阅链接
+              <a class="tab tab-xs gap-1.5 ${isSubTab ? 'tab-active' : ''}" id="tab-switch-sub">
+                ${uiIcon('link', { size: 13 })} Clash 订阅链接
               </a>
-              <a class="tab tab-xs gap-1 ${!isSubTab ? 'tab-active' : ''}" id="tab-switch-nodes">
-                ${uiIcon('layers', { size: 12 })} 节点分享链接导入
+              <a class="tab tab-xs gap-1.5 ${!isSubTab ? 'tab-active' : ''}" id="tab-switch-nodes">
+                ${uiIcon('layers', { size: 13 })} 节点分享链接导入
               </a>
             </div>
-            <button class="btn btn-xs btn-ghost" id="btn-cancel-add-sub">${uiIcon('x', { size: 12 })} 取消</button>
+            <button class="btn btn-xs btn-ghost gap-1" id="btn-cancel-add-sub">${uiIcon('x', { size: 13 })} 取消</button>
           </div>
 
           ${isSubTab ? `
-            <div class="space-y-2">
+            <div class="space-y-3">
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <input id="input-sub-name" class="input input-sm input-bordered" placeholder="订阅名称 (如: 某某机场)" value="${escapeHtml(subscriptionState.subInputName)}" />
-                <input id="input-sub-filter" class="input input-sm input-bordered" placeholder="排除正则 (默认已过滤公告)" value="${escapeHtml(subscriptionState.subInputFilter)}" />
+                <input id="input-sub-filter" class="input input-sm input-bordered sm:col-span-2" placeholder="排除正则 (默认已过滤公告/重置/到期)" value="${escapeHtml(subscriptionState.subInputFilter)}" />
                 <input id="input-sub-url" class="input input-sm input-bordered sm:col-span-3" placeholder="https://airport.com/api/v1/client/subscribe?token=..." value="${escapeHtml(subscriptionState.subInputUrl)}" />
               </div>
               <div class="flex justify-end">
-                <button class="btn btn-sm btn-primary" id="btn-submit-add-sub" ${subscriptionState.actionInProgress === 'add-sub' ? 'disabled' : ''}>
-                  ${subscriptionState.actionInProgress === 'add-sub' ? '<span class="loading loading-spinner loading-xs"></span>' : '拉取并挂载'}
+                <button class="btn btn-sm btn-primary gap-1 font-normal" id="btn-submit-add-sub" ${subscriptionState.actionInProgress === 'add-sub' ? 'disabled' : ''}>
+                  ${subscriptionState.actionInProgress === 'add-sub' ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('check', { size: 14 })} 拉取并挂载
                 </button>
               </div>
             </div>
           ` : `
-            <div class="space-y-2">
+            <div class="space-y-3">
               <input id="input-nodes-name" class="input input-sm input-bordered w-full" placeholder="前缀别名 (如: 自建香港)" value="${escapeHtml(subscriptionState.nodesInputName)}" />
               <textarea id="input-nodes-content" class="textarea textarea-sm textarea-bordered w-full font-mono text-xs" rows="3" placeholder="支持批量粘贴: ss://, vmess://, vless://, trojan://, hy2://">${escapeHtml(subscriptionState.nodesInputContent)}</textarea>
               <div class="flex justify-end">
-                <button class="btn btn-sm btn-primary" id="btn-submit-import-nodes" ${subscriptionState.actionInProgress === 'import-nodes' ? 'disabled' : ''}>
-                  ${subscriptionState.actionInProgress === 'import-nodes' ? '<span class="loading loading-spinner loading-xs"></span>' : '解析并导入'}
+                <button class="btn btn-sm btn-primary gap-1 font-normal" id="btn-submit-import-nodes" ${subscriptionState.actionInProgress === 'import-nodes' ? 'disabled' : ''}>
+                  ${subscriptionState.actionInProgress === 'import-nodes' ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('check', { size: 14 })} 解析并导入
                 </button>
               </div>
             </div>
@@ -608,15 +620,15 @@
     let simOutputHtml = '';
     if (simLoading) {
       simOutputHtml = `
-        <div class="p-4 text-center text-xs text-base-content/60">
+        <div class="p-6 text-center text-xs text-base-content/60">
           <span class="loading loading-spinner loading-sm text-primary"></span>
-          <div class="mt-1">正在逐层模拟分流匹配与回溯 DNS policy...</div>
+          <div class="mt-2">正在逐层模拟分流匹配与回溯 nameserver policy...</div>
         </div>
       `;
     } else if (simError) {
       simOutputHtml = `
-        <div class="alert alert-error text-xs py-2 gap-2">
-          ${uiIcon('circle-x', { size: 14, className: 'shrink-0' })}
+        <div class="alert alert-error text-xs py-2.5 gap-2">
+          ${uiIcon('circle-x', { size: 16, className: 'shrink-0' })}
           <span>推演失败: ${escapeHtml(simError)}</span>
         </div>
       `;
@@ -626,22 +638,25 @@
       const warnings = dns?.warnings || [];
 
       simOutputHtml = `
-        <div class="p-3 bg-base-100 rounded-lg border border-base-300 space-y-2 text-xs">
-          <div class="flex items-center justify-between border-b border-base-300/40 pb-2">
+        <div class="p-4 bg-base-100 rounded-xl border border-base-300 space-y-3 text-xs shadow-xs">
+          <div class="flex items-center justify-between border-b border-base-300/60 pb-2.5">
             <span class="text-base-content/60">分流策略匹配:</span>
-            <span class="badge badge-success font-bold">${escapeHtml(match?.target || 'DIRECT')}</span>
+            <span class="badge badge-success font-bold font-mono">${escapeHtml(match?.target || 'DIRECT')}</span>
           </div>
-          <div class="font-mono text-[11px] bg-base-200 p-1.5 rounded truncate">
-            ${escapeHtml(match?.raw || 'MATCH (Fallback)')}
+          <div>
+            <span class="text-base-content/50 block mb-1">命中规则链条:</span>
+            <div class="font-mono text-[11px] bg-base-200 p-2 rounded-lg truncate">
+              ${escapeHtml(match?.raw || 'MATCH (Fallback)')}
+            </div>
           </div>
           ${warnings.length > 0 ? `
-            <div class="alert alert-warning py-1.5 px-2 text-[11px] rounded gap-1.5">
-              ${uiIcon('alert-triangle', { size: 14, className: 'shrink-0' })}
+            <div class="alert alert-warning py-2 px-3 text-[11px] rounded-lg gap-2">
+              ${uiIcon('alert-triangle', { size: 15, className: 'shrink-0' })}
               <span>${escapeHtml(warnings[0])}</span>
             </div>
           ` : `
             <div class="flex items-center gap-1.5 text-[11px] text-success">
-              ${uiIcon('check-circle', { size: 13, className: 'shrink-0' })}
+              ${uiIcon('check-circle', { size: 14, className: 'shrink-0' })}
               <span>DNS 策略安全，未检测到境内明文解析污染</span>
             </div>
           `}
@@ -649,44 +664,58 @@
       `;
     }
 
-    // 装配 Modal Body 内容
-    body.innerHTML = `
-      <div class="space-y-4">
-        <div class="flex items-center justify-between border-b border-base-300 pb-3">
-          <div class="flex items-center gap-2">
-            <div class="flex items-center gap-1.5 text-lg font-bold">
-              ${uiIcon('tool', { size: 20, className: 'text-primary' })}
-              <span>网络聚合与诊断工具箱</span>
+    // 4. 装配子页面主结构
+    pageContainer.innerHTML = `
+      <div class="max-w-6xl w-full mx-auto space-y-6 pb-12">
+        <!-- 页面顶部 Header -->
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-base-300 pb-4">
+          <div class="flex items-center gap-3">
+            <div class="p-2 rounded-xl bg-primary/10 text-primary">
+              ${uiIcon('tool', { size: 22 })}
             </div>
-            <span class="badge badge-sm badge-outline font-mono">${escapeHtml(activeBackendUuid.replace('backend-', '').replace('-default', ''))}</span>
+            <div>
+              <div class="flex items-center gap-2">
+                <h1 class="text-lg font-bold tracking-tight">网络工具箱与聚合中心</h1>
+                <span class="badge badge-sm badge-outline font-mono">${escapeHtml(activeBackendUuid.replace('backend-', '').replace('-default', ''))}</span>
+              </div>
+              <p class="text-xs text-base-content/60 mt-0.5">多源出口竞速诊断 · 订阅与单节点多协议聚合 · 规则分流与 DNS 污染推演</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-sm btn-ghost gap-1.5 font-normal" id="btn-refresh-all-toolkit">
+              ${uiIcon('refresh', { size: 14 })} 刷新数据
+            </button>
+            <a href="#/proxies" class="btn btn-sm btn-outline gap-1.5 font-normal">
+              ${uiIcon('arrow-left', { size: 14 })} 节点代理页
+            </a>
           </div>
         </div>
 
-        <!-- 顶部出口 IP 诊断 -->
+        <!-- 顶部全宽出口 IP 看板 -->
         ${egressCardHtml}
 
-        <!-- 左右并列卡片 -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- 左右并列卡片 Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <!-- 左栏：订阅与节点中心 -->
-          <div class="card bg-base-200/50 border border-base-300 p-4">
-            <div class="flex items-center justify-between mb-3">
-              <div class="flex items-center gap-1.5">
-                ${uiIcon('link', { size: 16, className: 'text-primary' })}
-                <span class="font-bold text-sm">订阅与节点聚合</span>
-                ${isSubLoading ? '<span class="loading loading-spinner loading-xs"></span>' : ''}
+          <div class="card bg-base-200/60 border border-base-300 shadow-sm p-5 flex flex-col">
+            <div class="flex items-center justify-between mb-4">
+              <div class="flex items-center gap-2">
+                ${uiIcon('link', { size: 18, className: 'text-primary' })}
+                <span class="font-bold text-sm">订阅与节点聚合中心</span>
+                ${isSubLoading ? '<span class="loading loading-spinner loading-xs text-primary"></span>' : ''}
               </div>
               <button class="btn btn-xs btn-primary font-normal gap-1" id="btn-show-add-sub">
-                ${uiIcon('plus', { size: 12 })} 添加源
+                ${uiIcon('plus', { size: 13 })} 添加订阅源
               </button>
             </div>
 
             ${subAddFormHtml}
 
-            <div class="overflow-x-auto max-h-60 custom-scrollbar">
+            <div class="overflow-x-auto flex-1 custom-scrollbar">
               <table class="table table-xs w-full">
                 <thead>
                   <tr class="text-base-content/60 border-b border-base-300">
-                    <th>订阅别名</th>
+                    <th>订阅别名 / 来源</th>
                     <th>节点数</th>
                     <th>状态</th>
                     <th class="text-right">操作</th>
@@ -699,29 +728,30 @@
             </div>
           </div>
 
-          <!-- 右栏：规则分流与 DNS 推演 -->
-          <div class="card bg-base-200/50 border border-base-300 p-4">
-            <div class="flex items-center gap-1.5 mb-3">
-              ${uiIcon('target', { size: 16, className: 'text-primary' })}
-              <span class="font-bold text-sm">规则分流与 DNS 污染推演</span>
+          <!-- 右栏：规则推演与 DNS 污染模拟器 -->
+          <div class="card bg-base-200/60 border border-base-300 shadow-sm p-5 flex flex-col">
+            <div class="flex items-center gap-2 mb-4">
+              ${uiIcon('target', { size: 18, className: 'text-primary' })}
+              <span class="font-bold text-sm">规则分流与 DNS 污染推演模拟器</span>
             </div>
 
-            <div class="space-y-2 mb-3">
+            <div class="space-y-3 mb-4">
               <div class="join w-full">
                 <input
-                  id="toolkit-modal-sim-input"
+                  id="toolkit-sim-input"
                   class="input input-sm input-bordered join-item w-full font-mono text-xs"
-                  placeholder="测试域名 (如: api.openai.com)"
+                  placeholder="测试域名或 IP (如: api.openai.com)"
                   value="${escapeHtml(ruleSimulatorState.input)}"
                 />
-                <button class="btn btn-sm btn-primary join-item font-normal" id="btn-toolkit-modal-sim" ${simLoading ? 'disabled' : ''}>
-                  推演
+                <button class="btn btn-sm btn-primary join-item font-normal gap-1" id="btn-toolkit-run-sim" ${simLoading ? 'disabled' : ''}>
+                  ${simLoading ? '<span class="loading loading-spinner loading-xs"></span>' : ''} 推演
                 </button>
               </div>
 
-              <div class="flex flex-wrap items-center gap-1.5 pt-1">
+              <!-- 快捷测试标签 -->
+              <div class="flex flex-wrap items-center gap-1.5">
                 <span class="text-[10px] text-base-content/40">快捷:</span>
-                ${['api.openai.com', 'claude.ai', 'github.com', 'google.com'].map(d => `
+                ${['api.openai.com', 'claude.ai', 'github.com', 'google.com', 'bilibili.com'].map(d => `
                   <span class="badge badge-xs badge-ghost cursor-pointer hover:badge-primary quick-sim-tag font-mono text-[10px]" data-domain="${d}">
                     ${d}
                   </span>
@@ -735,35 +765,40 @@
       </div>
     `;
 
-    // 绑定内部交互事件
-    body.querySelector('#btn-modal-reprobe-egress')?.addEventListener('click', () => fetchEgressIp(true));
-    body.querySelector('#btn-toggle-egress-details')?.addEventListener('click', () => {
-      const container = body.querySelector('#egress-details-container');
+    // 绑定交互事件
+    pageContainer.querySelector('#btn-refresh-all-toolkit')?.addEventListener('click', () => {
+      fetchEgressIp(true);
+      fetchSubscriptions();
+    });
+
+    pageContainer.querySelector('#btn-reprobe-egress')?.addEventListener('click', () => fetchEgressIp(true));
+    pageContainer.querySelector('#btn-toggle-egress-details')?.addEventListener('click', () => {
+      const container = pageContainer.querySelector('#egress-details-container');
       if (container) container.classList.toggle('hidden');
     });
 
-    body.querySelector('#btn-show-add-sub')?.addEventListener('click', () => {
+    pageContainer.querySelector('#btn-show-add-sub')?.addEventListener('click', () => {
       subscriptionState.addFormVisible = !subscriptionState.addFormVisible;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     });
-    body.querySelector('#btn-cancel-add-sub')?.addEventListener('click', () => {
+    pageContainer.querySelector('#btn-cancel-add-sub')?.addEventListener('click', () => {
       subscriptionState.addFormVisible = false;
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     });
 
-    body.querySelector('#tab-switch-sub')?.addEventListener('click', () => {
+    pageContainer.querySelector('#tab-switch-sub')?.addEventListener('click', () => {
       subscriptionState.activeTab = 'sub';
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     });
-    body.querySelector('#tab-switch-nodes')?.addEventListener('click', () => {
+    pageContainer.querySelector('#tab-switch-nodes')?.addEventListener('click', () => {
       subscriptionState.activeTab = 'nodes';
-      renderToolkitModalContent();
+      renderToolkitSubpage();
     });
 
-    body.querySelector('#btn-submit-add-sub')?.addEventListener('click', () => {
-      const name = body.querySelector('#input-sub-name')?.value.trim();
-      const url = body.querySelector('#input-sub-url')?.value.trim();
-      const filter = body.querySelector('#input-sub-filter')?.value.trim();
+    pageContainer.querySelector('#btn-submit-add-sub')?.addEventListener('click', () => {
+      const name = pageContainer.querySelector('#input-sub-name')?.value.trim();
+      const url = pageContainer.querySelector('#input-sub-url')?.value.trim();
+      const filter = pageContainer.querySelector('#input-sub-filter')?.value.trim();
       if (!name || !url) {
         alert('请完整填写订阅名称与 URL');
         return;
@@ -771,9 +806,9 @@
       addSubscriptionUrl(name, url, filter);
     });
 
-    body.querySelector('#btn-submit-import-nodes')?.addEventListener('click', () => {
-      const name = body.querySelector('#input-nodes-name')?.value.trim();
-      const content = body.querySelector('#input-nodes-content')?.value.trim();
+    pageContainer.querySelector('#btn-submit-import-nodes')?.addEventListener('click', () => {
+      const name = pageContainer.querySelector('#input-nodes-name')?.value.trim();
+      const content = pageContainer.querySelector('#input-nodes-content')?.value.trim();
       if (!name || !content) {
         alert('请填写别名前缀并粘贴节点分享链接');
         return;
@@ -781,68 +816,29 @@
       importRawNodes(name, content);
     });
 
-    body.querySelectorAll('.sub-btn-update').forEach(btn => {
+    pageContainer.querySelectorAll('.sub-btn-update').forEach(btn => {
       btn.addEventListener('click', () => updateSubscription(btn.dataset.id));
     });
-    body.querySelectorAll('.sub-btn-toggle').forEach(btn => {
+    pageContainer.querySelectorAll('.sub-btn-toggle').forEach(btn => {
       btn.addEventListener('click', () => toggleSubscription(btn.dataset.id, btn.dataset.enabled !== 'true'));
     });
-    body.querySelectorAll('.sub-btn-delete').forEach(btn => {
+    pageContainer.querySelectorAll('.sub-btn-delete').forEach(btn => {
       btn.addEventListener('click', () => deleteSubscription(btn.dataset.id, btn.dataset.name));
     });
 
-    const simInput = body.querySelector('#toolkit-modal-sim-input');
-    const simBtn = body.querySelector('#btn-toolkit-modal-sim');
+    const simInput = pageContainer.querySelector('#toolkit-sim-input');
+    const simBtn = pageContainer.querySelector('#btn-toolkit-run-sim');
     simBtn?.addEventListener('click', () => runRuleSimulation(simInput?.value));
     simInput?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') runRuleSimulation(simInput.value);
     });
 
-    body.querySelectorAll('.quick-sim-tag').forEach(tag => {
+    pageContainer.querySelectorAll('.quick-sim-tag').forEach(tag => {
       tag.addEventListener('click', () => {
         if (simInput) simInput.value = tag.dataset.domain;
         runRuleSimulation(tag.dataset.domain);
       });
     });
-  }
-
-  // ==========================================
-  // 入口按钮优雅注入 (顶栏控制区 + 规则页)
-  // 零侵入、不污染 ul.sidebar-route-menu 结构
-  // ==========================================
-  function injectEntryButtons() {
-    // 1. 顶栏右侧控制按钮组注入 (div.flex.gap-2.p-2)
-    const topBar = document.querySelector('.flex.gap-2.p-2');
-    if (topBar && !document.getElementById('btn-topbar-toolkit')) {
-      const btn = document.createElement('button');
-      btn.id = 'btn-topbar-toolkit';
-      btn.className = 'btn btn-circle btn-sm';
-      btn.title = '网络工具箱 (订阅聚合 / 出口竞速 / 分流推演)';
-      btn.innerHTML = uiIcon('tool', { size: 16 });
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        openToolkitModal();
-      });
-      topBar.appendChild(btn);
-    }
-
-    // 2. 侧边栏底部操作区注入 (与内核管理按钮并列，完全不破坏 menu indicator)
-    const sidebarBottomContainer = document.querySelector('.sidebar .mt-1.flex.flex-col.items-center .flex.flex-col.items-center.justify-center.gap-2');
-    if (sidebarBottomContainer && !document.getElementById('btn-sidebar-bottom-toolkit')) {
-      const sideBtn = document.createElement('button');
-      sideBtn.id = 'btn-sidebar-bottom-toolkit';
-      sideBtn.className = 'btn btn-circle btn-sm';
-      sideBtn.title = '网络工具箱 (订阅/出口/推演)';
-      sideBtn.innerHTML = uiIcon('tool', { size: 16 });
-      sideBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        openToolkitModal();
-      });
-      sidebarBottomContainer.appendChild(sideBtn);
-    }
-
-    // 3. 在 #/rules 页面保留用户自定义规则管理入口
-    injectRulesPageButton();
   }
 
   // ==========================================
@@ -868,7 +864,6 @@
     topBar.appendChild(btn);
   }
 
-  // 用户规则管理模态弹窗
   function openUserRulesModal() {
     let modal = document.getElementById('user-rules-manager-modal');
     if (!modal) {
@@ -955,7 +950,7 @@
   }
 
   // ==========================================
-  // 全局定时轻量保活调度 (零侵入、零卡顿)
+  // 全局轻量调度 (无死循环、零卡顿)
   // ==========================================
   let isLoopRunning = false;
   function mainLoop() {
@@ -963,14 +958,15 @@
     isLoopRunning = true;
     try {
       checkBackendChange();
-      injectStyles();
-      injectEntryButtons();
+      injectSidebarItem();
+      syncToolkitView();
+      injectRulesPageButton();
     } finally {
       isLoopRunning = false;
     }
   }
 
-  setInterval(mainLoop, 800);
+  setInterval(mainLoop, 500);
   window.addEventListener('hashchange', mainLoop);
 
   if (document.readyState === 'loading') {

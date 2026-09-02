@@ -9,9 +9,8 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 const BUNDLE_PATH = path.join(REPO_ROOT, 'zashboard', 'src', 'user-rules-ui.js');
 
-console.log('--- Testing refactored clean user-rules-ui.js in simulated browser environment ---');
+console.log('--- Testing subpage-architecture user-rules-ui.js in simulated browser environment ---');
 
-// Mock browser DOM
 const windowEvents = new Map();
 const createdElements = [];
 
@@ -27,13 +26,6 @@ class MockClassList {
   }
   contains(cls) {
     return this.classes.has(cls);
-  }
-  toggle(cls) {
-    if (this.classes.has(cls)) {
-      this.classes.delete(cls);
-    } else {
-      this.classes.add(cls);
-    }
   }
 }
 
@@ -55,21 +47,6 @@ class MockElement {
     createdElements.push(this);
   }
 
-  set innerHTML(val) {
-    this._innerHTML = val;
-    // scan for id="..." in mock html
-    const matches = [...String(val).matchAll(/id=["']([^"']+)["']/g)];
-    for (const m of matches) {
-      const child = new MockElement('div');
-      child.id = m[1];
-      this.appendChild(child);
-    }
-  }
-
-  get innerHTML() {
-    return this._innerHTML || '';
-  }
-
   showModal() {
     this.open = true;
   }
@@ -82,6 +59,17 @@ class MockElement {
     child.parentElement = this;
     this.children.push(child);
     return child;
+  }
+
+  insertBefore(newNode, refNode) {
+    const idx = this.children.indexOf(refNode);
+    if (idx !== -1) {
+      newNode.parentElement = this;
+      this.children.splice(idx, 0, newNode);
+    } else {
+      this.appendChild(newNode);
+    }
+    return newNode;
   }
 
   removeChild(child) {
@@ -109,8 +97,26 @@ class MockElement {
     return this.attributes.get(k) || null;
   }
 
+  getBoundingClientRect() {
+    return { top: 100, bottom: 136, left: 8, right: 64, width: 56, height: 36 };
+  }
+
+  set innerHTML(val) {
+    this._innerHTML = val;
+    const matches = [...String(val).matchAll(/id=["']([^"']+)["']/g)];
+    for (const m of matches) {
+      const child = new MockElement('div');
+      child.id = m[1];
+      this.appendChild(child);
+    }
+  }
+
+  get innerHTML() {
+    return this._innerHTML || '';
+  }
+
   addEventListener(event, fn) {
-    if (!this.listeners.has(event)) this.listeners.set(event, []);
+    if (!windowEvents.has(event)) this.listeners.set(event, []);
     this.listeners.get(event).push(fn);
   }
 
@@ -159,12 +165,10 @@ const mockDoc = {
     return createdElements.find((el) => el.id === id) || null;
   },
   querySelector: (sel) => {
-    if (sel.includes('.flex.gap-2.p-2')) {
-      return topBar;
-    }
-    if (sel.includes('.sidebar')) {
-      return sidebarBottomContainer;
-    }
+    if (sel === '.home-page') return homePage;
+    if (sel === 'ul.sidebar-route-menu') return sidebarMenu;
+    if (sel === '.sidebar-tab-indicator') return indicator;
+    if (sel === '.flex.gap-2.p-2') return topBar;
     return mockDoc.body.querySelector(sel);
   },
   querySelectorAll: (sel) => mockDoc.body.querySelectorAll(sel),
@@ -174,22 +178,46 @@ const mockDoc = {
   },
 };
 
-// Setup DOM hierarchy mimicking zashboard
+// Setup DOM hierarchy mimicking zashboard home-page
 const homePage = new MockElement('div');
-homePage.className = 'home-page';
+homePage.className = 'bg-base-200 home-page flex size-full sidebar-collapsed';
 mockDoc.body.appendChild(homePage);
+
+// Child 0: sidebar
+const sidebarContainer = new MockElement('div');
+sidebarContainer.className = 'relative z-40 flex-none overflow-visible w-18';
+homePage.appendChild(sidebarContainer);
+
+const indicator = new MockElement('div');
+indicator.className = 'sidebar-tab-indicator';
+sidebarContainer.appendChild(indicator);
+
+const sidebarMenu = new MockElement('ul');
+sidebarMenu.className = 'sidebar-route-menu menu h-full w-full';
+sidebarContainer.appendChild(sidebarMenu);
+
+// Existing items
+['proxies', 'connections', 'logs', 'rules', 'settings'].forEach(route => {
+  const li = new MockElement('li');
+  li.setAttribute('data-sidebar-route', route);
+  const a = new MockElement('a');
+  a.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+  li.appendChild(a);
+  sidebarMenu.appendChild(li);
+});
+
+// Child 1: main container
+const mainContainer = new MockElement('div');
+mainContainer.className = 'relative flex-1 overflow-hidden';
+homePage.appendChild(mainContainer);
+
+const nativePage = new MockElement('div');
+nativePage.className = 'absolute flex h-full w-full flex-col overflow-y-auto';
+mainContainer.appendChild(nativePage);
 
 const topBar = new MockElement('div');
 topBar.className = 'flex gap-2 p-2';
-homePage.appendChild(topBar);
-
-const sidebar = new MockElement('div');
-sidebar.className = 'sidebar';
-homePage.appendChild(sidebar);
-
-const sidebarBottomContainer = new MockElement('div');
-sidebarBottomContainer.className = 'flex flex-col items-center justify-center gap-2';
-sidebar.appendChild(sidebarBottomContainer);
+nativePage.appendChild(topBar);
 
 // Setup globals
 global.document = mockDoc;
@@ -265,34 +293,32 @@ global.fetch = async (url) => {
 const bundleCode = fs.readFileSync(BUNDLE_PATH, 'utf-8');
 eval(bundleCode);
 
-// Assert topbar toolkit button injected
-const topbarBtn = mockDoc.getElementById('btn-topbar-toolkit');
-assert.ok(topbarBtn, 'Topbar toolkit button injected cleanly');
+// 1. Assert Sidebar MenuItem Injected
+const toolkitLi = mockDoc.getElementById('sidebar-item-toolkit');
+assert.ok(toolkitLi, 'Sidebar MenuItem #sidebar-item-toolkit injected');
 
-// Click topbar button to open modal
-topbarBtn.click();
-const modal = mockDoc.getElementById('zashboard-toolkit-modal');
-assert.ok(modal, 'Toolkit modal element created on click');
-assert.strictEqual(modal.open, true, 'Toolkit modal opened on click');
-
-const modalBody = mockDoc.getElementById('zashboard-toolkit-modal-body');
-assert.ok(modalBody, 'Toolkit modal body exists');
-assert.ok(modalBody.innerHTML.includes('网络聚合与诊断工具箱'), 'Toolkit title rendered inside modal');
-
-console.log('✅ Topbar Toolkit Modal opening asserts passed');
-
-// Test Rules Page Custom Rules Button
-global.location.hash = '#/rules';
+// 2. Navigate to #/toolkit Subpage
+global.location.hash = '#/toolkit';
 if (windowEvents.has('hashchange')) {
   for (const fn of windowEvents.get('hashchange')) fn();
 }
-const rulesBtn = mockDoc.getElementById('user-rules-top-action-btn');
-assert.ok(rulesBtn, 'UserRules button injected on #/rules');
-rulesBtn.click();
-const rulesModal = mockDoc.getElementById('user-rules-manager-modal');
-assert.ok(rulesModal, 'UserRules modal opened');
-assert.strictEqual(rulesModal.open, true, 'UserRules modal is open');
 
-console.log('✅ UserRules Modal asserts passed');
-console.log('🎉 All clean UI bundle tests passed successfully!');
+const subpage = mockDoc.getElementById('zashboard-toolkit-page');
+assert.ok(subpage, 'Subpage container #zashboard-toolkit-page rendered');
+assert.strictEqual(subpage.style.display, 'flex', 'Toolkit subpage is displayed');
+assert.strictEqual(nativePage.style.display, 'none', 'Native page is hidden while on toolkit');
+assert.ok(subpage.innerHTML.includes('网络工具箱与聚合中心'), 'Subpage header rendered');
+
+console.log('✅ #/toolkit Subpage Navigation and View Switching passed');
+
+// 3. Switch back to #/proxies
+global.location.hash = '#/proxies';
+if (windowEvents.has('hashchange')) {
+  for (const fn of windowEvents.get('hashchange')) fn();
+}
+assert.strictEqual(subpage.style.display, 'none', 'Toolkit subpage is hidden on #/proxies');
+assert.strictEqual(nativePage.style.display, '', 'Native page is restored on #/proxies');
+
+console.log('✅ Return to Native Page #/proxies restores layout passed');
+console.log('🎉 All Subpage Architecture tests passed successfully!');
 process.exit(0);
