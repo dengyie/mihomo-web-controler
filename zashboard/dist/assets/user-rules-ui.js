@@ -175,21 +175,23 @@
     if (!container) {
       container = document.createElement('div');
       container.id = 'zashboard-toast-container';
-      container.className = 'toast toast-bottom toast-end z-50 mb-6 mr-6';
-      document.body.appendChild(container);
+      container.className = 'toast toast-bottom toast-end';
+      container.style.cssText = 'position: fixed; bottom: 24px; right: 24px; z-index: 99999; display: flex; flex-direction: column; gap: 8px; pointer-events: none;';
+      const root = document.getElementById('app-content') || document.getElementById('app') || document.body;
+      root.appendChild(container);
     }
     const alertEl = document.createElement('div');
     const typeClass = type === 'error' ? 'alert-error' : type === 'warning' ? 'alert-warning' : type === 'success' ? 'alert-success' : 'alert-info';
-    alertEl.className = `alert ${typeClass} text-xs py-2 px-3 shadow-lg flex items-center gap-2 transition-all duration-300`;
+    alertEl.className = `alert ${typeClass} text-xs py-2.5 px-4 shadow-xl flex items-center gap-2 transition-all duration-300 pointer-events-auto rounded-lg`;
     const iconName = type === 'error' || type === 'warning' ? 'exclamation-triangle' : 'check';
     alertEl.innerHTML = `
       ${nativeIcon(iconName, 'h-4 w-4 shrink-0')}
-      <span>${escapeHtml(message)}</span>
+      <span class="font-medium">${escapeHtml(message)}</span>
     `;
     container.appendChild(alertEl);
     setTimeout(() => {
       alertEl.style.opacity = '0';
-      alertEl.style.transform = 'translateY(-8px)';
+      alertEl.style.transform = 'translateY(8px)';
       setTimeout(() => alertEl.remove(), 300);
     }, 3000);
   }
