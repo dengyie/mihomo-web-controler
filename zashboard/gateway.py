@@ -13,6 +13,7 @@ import socketserver
 import threading
 import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 # Environment variable support for directories and paths
