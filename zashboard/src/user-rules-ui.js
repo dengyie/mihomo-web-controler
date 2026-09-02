@@ -265,9 +265,14 @@
     return headers;
   }
 
+  // Toolkit 激活状态
+  let isToolkitActive = false;
+
   function isToolkitRoute() {
+    if (isToolkitActive) return true;
     const h = location.hash || '';
-    return h.startsWith('#/toolkit') || h.startsWith('#/subscriptions');
+    const search = location.search || '';
+    return h.includes('toolkit') || h.includes('subscriptions') || search.includes('toolkit=1');
   }
 
   // ==========================================
@@ -362,15 +367,12 @@
     if (!pill) {
       pill = document.createElement('div');
       pill.id = 'zashboard-floating-egress-pill';
-      pill.title = '落地出口 IP 诊断 (点击前往网络工具箱)';
+      pill.title = '落地出口 IP 诊断 (点击打开网络工具箱)';
       pill.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (location.hash !== '#/toolkit') {
-          location.hash = '#/toolkit';
-        } else {
-          fetchEgressIp(true);
-        }
+        isToolkitActive = true;
+        syncRouteView();
       };
       document.body.appendChild(pill);
     }
@@ -811,9 +813,9 @@
             <button class="btn btn-sm btn-ghost gap-1.5 font-normal" id="btn-refresh-all">
               <span>🔄</span> 刷新状态
             </button>
-            <a href="#/proxies" class="btn btn-sm btn-outline gap-1 font-normal">
-              <span>🚀</span> 节点代理页
-            </a>
+            <button class="btn btn-sm btn-outline gap-1 font-normal" id="btn-close-toolkit">
+              <span>✕</span> 返回原生视图
+            </button>
           </div>
         </div>
 
@@ -943,11 +945,10 @@
       </div>
     `;
 
-    // --- 事件绑定 ---
-    // 刷新全部
-    viewContainer.querySelector('#btn-refresh-all')?.addEventListener('click', () => {
-      fetchEgressIp(true);
-      fetchSubscriptions();
+    // 退出工具箱
+    viewContainer.querySelector('#btn-close-toolkit')?.addEventListener('click', () => {
+      isToolkitActive = false;
+      syncRouteView();
     });
 
     // 出口看板按钮
@@ -1058,67 +1059,44 @@
   }
 
   // ==========================================
-  // 6. 路由管理与页面切换调度 (严格幂等，避免无谓重绘)
+  // 6. 路由管理与页面切换调度 (独立视图覆盖层模式)
   // ==========================================
-  let lastRouteWasToolkit = false;
   function syncRouteView() {
     const isToolkit = isToolkitRoute();
-
-    // 查找主内容区域
     const homePage = document.querySelector('.home-page');
-    let mainArea = null;
-    if (homePage) {
-      mainArea = homePage.querySelector('.flex-1') || homePage.lastElementChild;
-    }
+    if (!homePage) return;
 
     let toolkitView = document.getElementById('zashboard-toolkit-view');
 
     if (isToolkit) {
-      if (mainArea) {
-        // 只在初次切入或子元素未隐藏时遍历
-        if (!lastRouteWasToolkit || (toolkitView && toolkitView.style.display === 'none')) {
-          Array.from(mainArea.children).forEach((child) => {
-            if (child.id !== 'zashboard-toolkit-view') {
-              child.style.display = 'none';
-            }
-          });
-        }
-
-        if (!toolkitView) {
-          toolkitView = document.createElement('div');
-          toolkitView.id = 'zashboard-toolkit-view';
-          toolkitView.className = 'p-4 md:p-6 bg-base-100 text-base-content';
-          mainArea.appendChild(toolkitView);
-          // 初次进入拉取数据
-          fetchEgressIp(false);
-          fetchSubscriptions();
-        }
-        toolkitView.style.display = 'block';
-        if (!lastRouteWasToolkit) {
-          renderToolkitPage();
-        }
+      if (!toolkitView) {
+        toolkitView = document.createElement('div');
+        toolkitView.id = 'zashboard-toolkit-view';
+        toolkitView.className = 'bg-base-100 text-base-content';
+        toolkitView.style.cssText = `
+          position: absolute;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          left: 72px;
+          z-index: 35;
+          overflow-y: auto;
+          padding: 1.5rem;
+          box-sizing: border-box;
+          animation: urFadeIn 0.15s ease-out;
+        `;
+        homePage.appendChild(toolkitView);
+        fetchEgressIp(false);
+        fetchSubscriptions();
       }
-      lastRouteWasToolkit = true;
+      toolkitView.style.display = 'block';
+      renderToolkitPage();
     } else {
-      // 切回原生页面（如 Overview, Proxies, Rules 等）
-      if (lastRouteWasToolkit) {
-        if (toolkitView) {
-          toolkitView.style.display = 'none';
-        }
-        if (mainArea) {
-          Array.from(mainArea.children).forEach((child) => {
-            if (child.id !== 'zashboard-toolkit-view') {
-              if (child.style.display === 'none') {
-                child.style.display = '';
-              }
-            }
-          });
-        }
-        lastRouteWasToolkit = false;
+      if (toolkitView) {
+        toolkitView.style.display = 'none';
       }
     }
 
-    // 侧边栏 Item 的 active 样式同步
     syncSidebarActive(isToolkit);
   }
 
@@ -1135,17 +1113,12 @@
     const inactiveCls = 'hover:bg-base-300! justify-center relative z-10 py-2';
 
     if (isToolkit) {
-      if (a.className !== activeCls) {
-        a.className = activeCls;
-      }
-      // 移除原生菜单项的激活类，避免双高亮
+      if (a.className !== activeCls) a.className = activeCls;
       document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) a.sidebar-tab-active').forEach((el) => {
         el.className = inactiveCls;
       });
     } else {
-      if (a.className !== inactiveCls) {
-        a.className = inactiveCls;
-      }
+      if (a.className !== inactiveCls) a.className = inactiveCls;
     }
   }
 
@@ -1153,13 +1126,24 @@
     const menuUl = document.querySelector('ul.sidebar-route-menu');
     if (!menuUl) return;
 
+    // 监听原生菜单点击，点击原生项时退出 toolkit
+    menuUl.querySelectorAll('li:not(#sidebar-item-toolkit)').forEach((li) => {
+      if (!li.getAttribute('data-toolkit-listener')) {
+        li.setAttribute('data-toolkit-listener', '1');
+        li.addEventListener('click', () => {
+          isToolkitActive = false;
+          syncRouteView();
+        });
+      }
+    });
+
     let item = document.getElementById('sidebar-item-toolkit');
     if (!item) {
       item = document.createElement('li');
       item.id = 'sidebar-item-toolkit';
       item.className = '';
       item.innerHTML = `
-        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/toolkit">
+        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="javascript:void(0);">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" class="h-5 w-5">
             <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
           </svg>
@@ -1167,10 +1151,10 @@
       `;
       item.querySelector('a')?.addEventListener('click', (e) => {
         e.preventDefault();
-        location.hash = '#/toolkit';
+        isToolkitActive = !isToolkitActive;
+        syncRouteView();
       });
 
-      // 插入在设置（通常是最后一个）之前，或直接追加
       const lastLi = menuUl.lastElementChild;
       if (lastLi && menuUl.children.length >= 4) {
         menuUl.insertBefore(item, lastLi);
