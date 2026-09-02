@@ -347,7 +347,7 @@
   // ==========================================
   function isToolkitRoute() {
     const h = location.hash || '';
-    return h.startsWith('#/toolkit') || h.startsWith('#/subscriptions');
+    return h.includes('tab=toolkit') || h.startsWith('#/toolkit') || h.startsWith('#/subscriptions');
   }
 
   function syncToolkitView() {
@@ -407,16 +407,19 @@
       item.id = 'sidebar-item-toolkit';
       item.setAttribute('data-sidebar-route', 'toolkit');
       item.innerHTML = `
-        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/toolkit">
+        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/proxies?tab=toolkit">
           ${uiIcon('tool', { size: 20 })}
         </a>
       `;
 
-      item.querySelector('a')?.addEventListener('click', (e) => {
+      // 捕获阶段拦截点击，阻止原生 Vue Router 冒泡覆盖 hash
+      item.addEventListener('click', (e) => {
         e.preventDefault();
-        location.hash = '#/toolkit';
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        location.hash = '#/proxies?tab=toolkit';
         syncToolkitView();
-      });
+      }, true);
 
       // 插入在设置（最后一个）之前
       const lastLi = menuUl.lastElementChild;

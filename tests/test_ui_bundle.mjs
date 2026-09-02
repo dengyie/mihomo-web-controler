@@ -297,8 +297,8 @@ eval(bundleCode);
 const toolkitLi = mockDoc.getElementById('sidebar-item-toolkit');
 assert.ok(toolkitLi, 'Sidebar MenuItem #sidebar-item-toolkit injected');
 
-// 2. Navigate to #/toolkit Subpage
-global.location.hash = '#/toolkit';
+// 2. Navigate to Toolkit Subpage
+global.location.hash = '#/proxies?tab=toolkit';
 if (windowEvents.has('hashchange')) {
   for (const fn of windowEvents.get('hashchange')) fn();
 }
@@ -309,7 +309,7 @@ assert.strictEqual(subpage.style.display, 'flex', 'Toolkit subpage is displayed'
 assert.strictEqual(nativePage.style.display, 'none', 'Native page is hidden while on toolkit');
 assert.ok(subpage.innerHTML.includes('网络工具箱与聚合中心'), 'Subpage header rendered');
 
-console.log('✅ #/toolkit Subpage Navigation and View Switching passed');
+console.log('✅ Toolkit Subpage Navigation and View Switching passed');
 
 // 3. Switch back to #/proxies
 global.location.hash = '#/proxies';
