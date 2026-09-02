@@ -1,103 +1,81 @@
-// Node.js test for user-rules-ui.js UI logic and DOM interactions
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Unit test suite for user-rules-ui frontend bundle
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const uiSrc = readFileSync(resolve(root, 'zashboard/dist/assets/user-rules-ui.js'), 'utf8');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '..');
+const BUNDLE_PATH = path.join(REPO_ROOT, 'zashboard', 'src', 'user-rules-ui.js');
 
-console.log('--- Testing user-rules-ui.js in simulated browser environment ---');
+console.log('--- Testing refactored clean user-rules-ui.js in simulated browser environment ---');
 
-// Mock a lightweight browser environment
-const localStorageStore = new Map();
+// Mock browser DOM
 const windowEvents = new Map();
+const createdElements = [];
 
-global.localStorage = {
-  getItem: (k) => localStorageStore.get(k) || null,
-  setItem: (k, v) => localStorageStore.set(k, String(v)),
-  removeItem: (k) => localStorageStore.delete(k),
-  clear: () => localStorageStore.clear(),
-};
-
-global.location = {
-  hash: '#/rules',
-};
-
-global.window = {
-  addEventListener: (event, handler) => {
-    if (!windowEvents.has(event)) windowEvents.set(event, []);
-    windowEvents.get(event).push(handler);
-  },
-  matchMedia: () => ({ matches: false, addEventListener: () => {} }),
-};
+class MockClassList {
+  constructor() {
+    this.classes = new Set();
+  }
+  add(...cls) {
+    cls.forEach((c) => this.classes.add(c));
+  }
+  remove(...cls) {
+    cls.forEach((c) => this.classes.delete(c));
+  }
+  contains(cls) {
+    return this.classes.has(cls);
+  }
+  toggle(cls) {
+    if (this.classes.has(cls)) {
+      this.classes.delete(cls);
+    } else {
+      this.classes.add(cls);
+    }
+  }
+}
 
 class MockElement {
   constructor(tagName) {
     this.tagName = tagName.toUpperCase();
     this.id = '';
     this.className = '';
-    this.style = {};
     this.children = [];
     this.parentElement = null;
     this.attributes = new Map();
-    this._innerHTML = '';
-    this.onclick = null;
-    this.oninput = null;
-    this.onkeydown = null;
-    this.onchange = null;
-    this.value = '';
     this.listeners = new Map();
+    this._innerHTML = '';
+    this.innerText = '';
+    this.style = {};
+    this.open = false;
+    this.classList = new MockClassList();
+    this.dataset = {};
+    createdElements.push(this);
   }
 
-  getAttribute(name) {
-    return this.attributes.get(name) || null;
-  }
-
-  setAttribute(name, value) {
-    this.attributes.set(name, String(value));
-  }
-
-  addEventListener(event, handler) {
-    if (!this.listeners.has(event)) this.listeners.set(event, []);
-    this.listeners.get(event).push(handler);
-  }
-
-  dispatchEvent(event) {
-    const list = this.listeners.get(event.type) || [];
-    for (const h of list) h(event);
-    if (event.type === 'click' && this.onclick) this.onclick(event);
-  }
-
-  click() {
-    this.dispatchEvent({ type: 'click', currentTarget: this, target: this, preventDefault: () => {}, stopPropagation: () => {} });
-  }
-
-  get textContent() {
-    return this._innerHTML.replace(/<[^>]+>/g, '');
-  }
-
-  set textContent(val) {
-    this._innerHTML = String(val);
+  set innerHTML(val) {
+    this._innerHTML = val;
+    // scan for id="..." in mock html
+    const matches = [...String(val).matchAll(/id=["']([^"']+)["']/g)];
+    for (const m of matches) {
+      const child = new MockElement('div');
+      child.id = m[1];
+      this.appendChild(child);
+    }
   }
 
   get innerHTML() {
-    return this._innerHTML;
+    return this._innerHTML || '';
   }
 
-  set innerHTML(html) {
-    this._innerHTML = html;
-    this.children = [];
+  showModal() {
+    this.open = true;
+  }
 
-    // Simple parser to extract IDs and classes for querySelector
-    const idRegex = /id=["']([^"']+)["']/g;
-    let m;
-    while ((m = idRegex.exec(html)) !== null) {
-      const child = new MockElement('div');
-      child.id = m[1];
-      child.parentElement = this;
-      this.children.push(child);
-    }
+  close() {
+    this.open = false;
   }
 
   appendChild(child) {
@@ -106,106 +84,139 @@ class MockElement {
     return child;
   }
 
-  insertBefore(newChild, refChild) {
-    newChild.parentElement = this;
-    const idx = this.children.indexOf(refChild);
-    if (idx === -1) {
-      this.children.push(newChild);
-    } else {
-      this.children.splice(idx, 0, newChild);
+  removeChild(child) {
+    const idx = this.children.indexOf(child);
+    if (idx !== -1) {
+      this.children.splice(idx, 1);
+      child.parentElement = null;
     }
-    return newChild;
-  }
-
-  insertAdjacentElement(position, element) {
-    element.parentElement = this.parentElement;
-    if (!this.parentElement) return;
-    const parentChildren = this.parentElement.children;
-    const idx = parentChildren.indexOf(this);
-    if (position === 'beforebegin') {
-      if (idx !== -1) parentChildren.splice(idx, 0, element);
-      else parentChildren.push(element);
-    } else if (position === 'afterend') {
-      if (idx !== -1) parentChildren.splice(idx + 1, 0, element);
-      else parentChildren.push(element);
-    } else if (position === 'afterbegin') {
-      this.children.unshift(element);
-      element.parentElement = this;
-    } else if (position === 'beforeend') {
-      this.children.push(element);
-      element.parentElement = this;
-    }
+    return child;
   }
 
   remove() {
     if (this.parentElement) {
-      const idx = this.parentElement.children.indexOf(this);
-      if (idx !== -1) this.parentElement.children.splice(idx, 1);
-      this.parentElement = null;
+      this.parentElement.removeChild(this);
+    }
+  }
+
+  setAttribute(k, v) {
+    this.attributes.set(k, String(v));
+    if (k === 'id') this.id = String(v);
+    if (k === 'class') this.className = String(v);
+  }
+
+  getAttribute(k) {
+    return this.attributes.get(k) || null;
+  }
+
+  addEventListener(event, fn) {
+    if (!this.listeners.has(event)) this.listeners.set(event, []);
+    this.listeners.get(event).push(fn);
+  }
+
+  click() {
+    if (this.listeners.has('click')) {
+      for (const fn of this.listeners.get('click')) {
+        fn({
+          preventDefault: () => {},
+          stopPropagation: () => {},
+          target: this,
+        });
+      }
     }
   }
 
   querySelector(selector) {
-    return this.querySelectorAll(selector)[0] || null;
+    const matches = this.querySelectorAll(selector);
+    return matches.length > 0 ? matches[0] : null;
   }
 
   querySelectorAll(selector) {
     const results = [];
-    const search = (node) => {
+    const walk = (node) => {
       for (const child of node.children) {
-        let match = false;
-        if (selector.startsWith('#') && child.id === selector.slice(1)) match = true;
-        else if (selector.startsWith('.') && child.className.includes(selector.slice(1))) match = true;
-        else if (child.tagName.toLowerCase() === selector.toLowerCase()) match = true;
-        else if (selector.includes('.') && child.tagName.toLowerCase() === selector.split('.')[0].toLowerCase() && child.className.includes(selector.split('.')[1])) match = true;
-        else if (selector.includes(child.id) && child.id) match = true;
-
-        if (match) results.push(child);
-        search(child);
+        if (selector.startsWith('#') && child.id === selector.slice(1)) {
+          results.push(child);
+        } else if (selector.startsWith('.') && (child.className || '').includes(selector.slice(1))) {
+          results.push(child);
+        } else if (child.tagName.toLowerCase() === selector.toLowerCase()) {
+          results.push(child);
+        }
+        walk(child);
       }
     };
-    search(this);
+    walk(this);
     return results;
   }
 }
 
-class MockDocument {
-  constructor() {
-    this.head = new MockElement('head');
-    this.body = new MockElement('body');
-  }
+const mockDoc = {
+  head: new MockElement('head'),
+  body: new MockElement('body'),
+  readyState: 'complete',
+  createElement: (tagName) => new MockElement(tagName),
+  getElementById: (id) => {
+    return createdElements.find((el) => el.id === id) || null;
+  },
+  querySelector: (sel) => {
+    if (sel.includes('.flex.gap-2.p-2')) {
+      return topBar;
+    }
+    if (sel.includes('.sidebar')) {
+      return sidebarBottomContainer;
+    }
+    return mockDoc.body.querySelector(sel);
+  },
+  querySelectorAll: (sel) => mockDoc.body.querySelectorAll(sel),
+  addEventListener: (event, fn) => {
+    if (!windowEvents.has(event)) windowEvents.set(event, []);
+    windowEvents.get(event).push(fn);
+  },
+};
 
-  createElement(tagName) {
-    return new MockElement(tagName);
-  }
+// Setup DOM hierarchy mimicking zashboard
+const homePage = new MockElement('div');
+homePage.className = 'home-page';
+mockDoc.body.appendChild(homePage);
 
-  getElementById(id) {
-    return this.body.querySelector('#' + id) || (this.head.querySelector('#' + id)) || null;
-  }
+const topBar = new MockElement('div');
+topBar.className = 'flex gap-2 p-2';
+homePage.appendChild(topBar);
 
-  querySelector(selector) {
-    return this.body.querySelector(selector) || this.head.querySelector(selector) || null;
-  }
+const sidebar = new MockElement('div');
+sidebar.className = 'sidebar';
+homePage.appendChild(sidebar);
 
-  querySelectorAll(selector) {
-    return [...this.head.querySelectorAll(selector), ...this.body.querySelectorAll(selector)];
-  }
-}
+const sidebarBottomContainer = new MockElement('div');
+sidebarBottomContainer.className = 'flex flex-col items-center justify-center gap-2';
+sidebar.appendChild(sidebarBottomContainer);
 
-const mockDoc = new MockDocument();
+// Setup globals
 global.document = mockDoc;
-
-class MockMutationObserver {
-  constructor(cb) { this.cb = cb; }
-  observe() {}
-  disconnect() {}
-}
-global.MutationObserver = MockMutationObserver;
-
-// Mock Fetch API
-const fetchCalls = [];
-global.fetch = async (url, opts = {}) => {
-  fetchCalls.push({ url, opts });
+global.window = {
+  addEventListener: (event, fn) => {
+    if (!windowEvents.has(event)) windowEvents.set(event, []);
+    windowEvents.get(event).push(fn);
+  },
+};
+global.location = {
+  hash: '#/proxies',
+  search: '',
+  href: 'https://3x-ui.mangoqwq.com/#/proxies',
+};
+global.localStorage = {
+  _store: new Map([
+    ['setup/active-uuid', 'backend-tebi-default'],
+    ['setup/api-list', JSON.stringify([{ uuid: 'backend-tebi-default', password: 'test-secret-pwd' }])],
+  ]),
+  getItem(k) {
+    return this._store.get(k) || null;
+  },
+  setItem(k, v) {
+    this._store.set(k, String(v));
+  },
+};
+global.fetch = async (url) => {
   if (url.includes('/diagnostics/egress-ip')) {
     return {
       ok: true,
@@ -213,25 +224,14 @@ global.fetch = async (url, opts = {}) => {
       json: async () => ({
         status: 'ok',
         data: {
-          success: true,
           fastest: {
             source: 'ip-api.com',
-            latency_ms: 45.2,
-            data: {
-              ip: '104.28.19.45',
-              country: 'Hong Kong',
-              country_code: 'HK',
-              city: 'Hong Kong',
-              isp: 'Cloudflare, Inc.',
-              asn: '13335',
-            }
+            latency_ms: 220,
+            data: { ip: '1.2.3.4', country_code: 'US', country: 'United States', city: 'San Jose' },
           },
-          all_results: [
-            { source: 'ip-api.com', success: true, latency_ms: 45.2 },
-            { source: 'cloudflare', success: true, latency_ms: 55.1 }
-          ]
-        }
-      })
+          probes: [],
+        },
+      }),
     };
   }
   if (url.includes('/subscriptions')) {
@@ -240,117 +240,59 @@ global.fetch = async (url, opts = {}) => {
       status: 200,
       json: async () => ({
         status: 'ok',
-        data: {
-          subscriptions: [
-            {
-              id: 'sub-1',
-              name: '专线订阅',
-              type: 'remote',
-              url: 'https://example.com/sub',
-              node_count: 35,
-              enabled: true,
-              updated_at: '2026-09-02T12:00:00',
-            }
-          ]
-        }
-      })
+        data: { subscriptions: [] },
+      }),
     };
   }
-  if (url.includes('/simulate')) {
+  if (url.includes('/user-rules')) {
     return {
       ok: true,
       status: 200,
       json: async () => ({
         status: 'ok',
-        data: {
-          success: true,
-          domain: 'api.openai.com',
-          matched_rule: {
-            type: 'DOMAIN-SUFFIX',
-            payload: 'openai.com',
-            target: 'PROXY',
-            raw: 'DOMAIN-SUFFIX,openai.com,PROXY',
-          },
-          dns: {
-            nameservers: ['https://1.1.1.1/dns-query'],
-            warnings: [],
-          },
-        },
+        data: { rules: [] },
       }),
     };
   }
   return {
     ok: true,
     status: 200,
-    json: async () => ({ status: 'ok', rules: [], targets: ['DIRECT', 'PROXY', 'REJECT'] }),
+    json: async () => ({ status: 'ok', data: {} }),
   };
 };
 
-// Seed zashboard DOM Structure: .home-page with sidebar menu and main content area
-const homePage = new MockElement('div');
-homePage.className = 'home-page';
+// Execute bundle code
+const bundleCode = fs.readFileSync(BUNDLE_PATH, 'utf-8');
+eval(bundleCode);
 
-const sidebarCol = new MockElement('div');
-const sidebarMenu = new MockElement('ul');
-sidebarMenu.className = 'sidebar-route-menu menu';
-sidebarCol.appendChild(sidebarMenu);
-homePage.appendChild(sidebarCol);
+// Assert topbar toolkit button injected
+const topbarBtn = mockDoc.getElementById('btn-topbar-toolkit');
+assert.ok(topbarBtn, 'Topbar toolkit button injected cleanly');
 
-const mainContent = new MockElement('div');
-mainContent.className = 'relative flex-1';
-homePage.appendChild(mainContent);
+// Click topbar button to open modal
+topbarBtn.click();
+const modal = mockDoc.getElementById('zashboard-toolkit-modal');
+assert.ok(modal, 'Toolkit modal element created on click');
+assert.strictEqual(modal.open, true, 'Toolkit modal opened on click');
 
-mockDoc.body.appendChild(homePage);
+const modalBody = mockDoc.getElementById('zashboard-toolkit-modal-body');
+assert.ok(modalBody, 'Toolkit modal body exists');
+assert.ok(modalBody.innerHTML.includes('网络聚合与诊断工具箱'), 'Toolkit title rendered inside modal');
 
-// Also seed rules toolbar
-const rulesContainer = new MockElement('div');
-rulesContainer.className = 'rules-container';
-const toolbar = new MockElement('div');
-toolbar.className = 'toolbar';
-const searchInput = new MockElement('input');
-searchInput.setAttribute('placeholder', '搜索规则 / Search');
-const gearBtn = new MockElement('button');
-gearBtn.className = 'btn-circle btn-sm';
-toolbar.appendChild(searchInput);
-toolbar.appendChild(gearBtn);
-rulesContainer.appendChild(toolbar);
-mockDoc.body.appendChild(rulesContainer);
+console.log('✅ Topbar Toolkit Modal opening asserts passed');
 
-// Execute bundle
-eval(uiSrc);
-
-// Assertions
-assert.ok(mockDoc.getElementById('user-rules-custom-styles'), 'Custom styles injected');
-assert.ok(mockDoc.getElementById('zashboard-floating-egress-pill'), 'Global Floating Egress Pill injected');
-assert.ok(mockDoc.getElementById('sidebar-item-toolkit'), 'Sidebar toolkit navigation item injected');
-assert.ok(mockDoc.getElementById('user-rules-top-action-btn'), 'UserRules button injected on #/rules');
-
-console.log('✅ Base UI Injection asserts passed');
-
-// Test Navigation to #/toolkit
-global.location.hash = '#/toolkit';
-// trigger listeners or loop
-if (windowEvents.has('hashchange')) {
-  for (const fn of windowEvents.get('hashchange')) fn();
-}
-
-assert.ok(mockDoc.getElementById('zashboard-toolkit-view'), 'Toolkit view container injected on #/toolkit');
-const toolkitView = mockDoc.getElementById('zashboard-toolkit-view');
-assert.ok(toolkitView.children.length > 0, 'Toolkit view has child sections rendered');
-
-console.log('✅ #/toolkit View Activation & Rendering asserts passed');
-
-// Test UserRules Modal on #/rules
+// Test Rules Page Custom Rules Button
 global.location.hash = '#/rules';
 if (windowEvents.has('hashchange')) {
   for (const fn of windowEvents.get('hashchange')) fn();
 }
 const rulesBtn = mockDoc.getElementById('user-rules-top-action-btn');
-assert.ok(rulesBtn, 'UserRules button present on #/rules');
+assert.ok(rulesBtn, 'UserRules button injected on #/rules');
 rulesBtn.click();
-assert.ok(mockDoc.getElementById('user-rules-manager-modal'), 'UserRules modal opened on click');
+const rulesModal = mockDoc.getElementById('user-rules-manager-modal');
+assert.ok(rulesModal, 'UserRules modal opened');
+assert.strictEqual(rulesModal.open, true, 'UserRules modal is open');
 
 console.log('✅ UserRules Modal asserts passed');
-
-console.log('🎉 All frontend UI unit tests passed successfully!');
+console.log('🎉 All clean UI bundle tests passed successfully!');
 process.exit(0);
