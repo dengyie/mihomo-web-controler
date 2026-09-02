@@ -175,7 +175,7 @@
     if (!container) {
       container = document.createElement('div');
       container.id = 'zashboard-toast-container';
-      container.className = 'toast toast-top toast-end z-50';
+      container.className = 'toast toast-top toast-end z-50 mt-14 mr-4';
       document.body.appendChild(container);
     }
     const alertEl = document.createElement('div');
@@ -412,6 +412,8 @@
     return h.includes('tab=toolkit') || h.startsWith('#/toolkit') || h.startsWith('#/subscriptions');
   }
 
+  let lastRouteWasToolkit = false;
+
   function syncToolkitView() {
     const isToolkit = isToolkitRoute();
     const homePage = document.querySelector('.home-page');
@@ -425,7 +427,7 @@
       // 隐藏原生页面（Overview / Proxies / Rules 等）的所有子 DOM
       Array.from(mainContainer.children).forEach((child) => {
         if (child.id !== 'zashboard-toolkit-page') {
-          child.style.display = 'none';
+          if (child.style.display !== 'none') child.style.display = 'none';
         }
       });
 
@@ -433,24 +435,26 @@
         toolkitPage = document.createElement('div');
         toolkitPage.id = 'zashboard-toolkit-page';
         toolkitPage.className = 'absolute flex h-full w-full flex-col overflow-y-auto';
+        toolkitPage.style.display = 'flex';
         mainContainer.appendChild(toolkitPage);
         fetchEgressIp(false);
         fetchSubscriptions();
+        renderToolkitSubpage();
+      } else if (!lastRouteWasToolkit || toolkitPage.style.display === 'none') {
+        toolkitPage.style.display = 'flex';
+        renderToolkitSubpage();
       }
-      toolkitPage.style.display = 'flex';
-      renderToolkitSubpage();
+      lastRouteWasToolkit = true;
     } else {
-      // 切回原生页面时，隐藏工具箱子页面，还原原生页面
-      if (toolkitPage) {
-        toolkitPage.style.display = 'none';
-      }
-      Array.from(mainContainer.children).forEach((child) => {
-        if (child.id !== 'zashboard-toolkit-page') {
-          if (child.style.display === 'none') {
-            child.style.display = '';
+      if (lastRouteWasToolkit || (toolkitPage && toolkitPage.style.display !== 'none')) {
+        if (toolkitPage) toolkitPage.style.display = 'none';
+        Array.from(mainContainer.children).forEach((child) => {
+          if (child.id !== 'zashboard-toolkit-page') {
+            if (child.style.display === 'none') child.style.display = '';
           }
-        }
-      });
+        });
+      }
+      lastRouteWasToolkit = false;
     }
 
     syncSidebarActive();
