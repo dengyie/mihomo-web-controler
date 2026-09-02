@@ -99,8 +99,8 @@
     error: null,
     data: null,
     lastFetched: 0,
+    detailsOpen: false,
   };
-  let egressDetailsOpen = false;
 
   // 订阅管理状态
   let subscriptionState = {
@@ -166,6 +166,34 @@
     return headers;
   }
 
+  // ==========================================
+  // 原生轻量通知系统 (DaisyUI Toast / Alert)
+  // 非阻塞、原生样式自适应、支持 auto-dismiss
+  // ==========================================
+  function showToast(message, type = 'info') {
+    let container = document.getElementById('zashboard-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'zashboard-toast-container';
+      container.className = 'toast toast-top toast-end z-50';
+      document.body.appendChild(container);
+    }
+    const alertEl = document.createElement('div');
+    const typeClass = type === 'error' ? 'alert-error' : type === 'warning' ? 'alert-warning' : type === 'success' ? 'alert-success' : 'alert-info';
+    alertEl.className = `alert ${typeClass} text-xs py-2 px-3 shadow-lg flex items-center gap-2 transition-all duration-300`;
+    const iconName = type === 'error' || type === 'warning' ? 'exclamation-triangle' : 'check';
+    alertEl.innerHTML = `
+      ${nativeIcon(iconName, 'h-4 w-4 shrink-0')}
+      <span>${escapeHtml(message)}</span>
+    `;
+    container.appendChild(alertEl);
+    setTimeout(() => {
+      alertEl.style.opacity = '0';
+      alertEl.style.transform = 'translateY(-8px)';
+      setTimeout(() => alertEl.remove(), 300);
+    }, 3000);
+  }
+
   function checkBackendChange() {
     const currentUuid = localStorage.getItem('setup/active-uuid') || 'backend-tebi-default';
     if (currentUuid !== activeBackendUuid) {
@@ -173,6 +201,7 @@
       resolveBackendAndSecret();
       egressBadgeState.data = null;
       egressBadgeState.lastFetched = 0;
+      egressBadgeState.detailsOpen = false;
       subscriptionState.list = [];
       ruleSimulatorState.result = null;
     }
@@ -250,8 +279,9 @@
       subscriptionState.subInputUrl = '';
       subscriptionState.subInputFilter = '';
       await fetchSubscriptions();
+      showToast('订阅拉取并挂载成功', 'success');
     } catch (err) {
-      alert('添加订阅失败: ' + err.message);
+      showToast('添加订阅失败: ' + err.message, 'error');
     } finally {
       subscriptionState.actionInProgress = null;
       renderToolkitSubpage();
@@ -273,8 +303,9 @@
       subscriptionState.nodesInputName = '';
       subscriptionState.nodesInputContent = '';
       await fetchSubscriptions();
+      showToast('节点解析并导入成功', 'success');
     } catch (err) {
-      alert('导入节点失败: ' + err.message);
+      showToast('导入节点失败: ' + err.message, 'error');
     } finally {
       subscriptionState.actionInProgress = null;
       renderToolkitSubpage();
@@ -292,8 +323,9 @@
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
+      showToast('订阅更新成功', 'success');
     } catch (err) {
-      alert('更新订阅失败: ' + err.message);
+      showToast('更新订阅失败: ' + err.message, 'error');
     } finally {
       subscriptionState.actionInProgress = null;
       renderToolkitSubpage();
@@ -312,8 +344,9 @@
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
+      showToast(enabled ? '订阅已启用' : '订阅已停用', 'info');
     } catch (err) {
-      alert('切换状态失败: ' + err.message);
+      showToast('切换状态失败: ' + err.message, 'error');
     } finally {
       subscriptionState.actionInProgress = null;
       renderToolkitSubpage();
@@ -332,8 +365,9 @@
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
+      showToast('订阅已删除', 'info');
     } catch (err) {
-      alert('删除失败: ' + err.message);
+      showToast('删除失败: ' + err.message, 'error');
     } finally {
       subscriptionState.actionInProgress = null;
       renderToolkitSubpage();
@@ -343,7 +377,7 @@
   async function runRuleSimulation(inputDomain) {
     const query = (inputDomain || ruleSimulatorState.input || '').trim();
     if (!query) {
-      alert('请输入测试域名或 IP');
+      showToast('请输入测试域名或 IP', 'warning');
       return;
     }
 
@@ -670,10 +704,10 @@
             <button class="btn btn-circle btn-sm" id="btn-reprobe-egress" aria-label="重新测速" ${isEgressLoading ? 'disabled' : ''}>
               ${isEgressLoading ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('arrow-path', 'h-4 w-4')}
             </button>
-            <button class="btn btn-circle btn-ghost btn-sm transition-transform duration-200 ${egressDetailsOpen ? 'rotate-180' : ''}" id="btn-toggle-egress-details" aria-label="竞速明细">${nativeIcon('chevron-down', 'h-4 w-4')}</button>
+            <button class="btn btn-circle btn-ghost btn-sm transition-transform duration-200 ${egressBadgeState.detailsOpen ? 'rotate-180' : ''}" id="btn-toggle-egress-details" aria-label="竞速明细">${nativeIcon('chevron-down', 'h-4 w-4')}</button>
           </div>
         </div>
-        <div id="egress-details-container" class="${egressDetailsOpen ? 'flex' : 'hidden'} flex-col gap-2 p-4">
+        <div id="egress-details-container" class="${egressBadgeState.detailsOpen ? 'flex' : 'hidden'} flex-col gap-2 p-4">
           ${probesHtml || '<div class="text-xs text-base-content/40">暂无竞速明细</div>'}
         </div>
       </div>
@@ -720,7 +754,8 @@
             <input id="input-sub-name" class="input input-sm w-full" placeholder="订阅名称 (如: 某某机场)" value="${escapeHtml(subscriptionState.subInputName)}" />
             <input id="input-sub-url" class="input input-sm w-full" placeholder="https://airport.com/api/v1/client/subscribe?token=..." value="${escapeHtml(subscriptionState.subInputUrl)}" />
             <input id="input-sub-filter" class="input input-sm w-full" placeholder="排除正则 (默认已过滤公告/重置/到期)" value="${escapeHtml(subscriptionState.subInputFilter)}" />
-            <div class="flex justify-end">
+            <div class="flex justify-end gap-2">
+              <button class="btn btn-ghost btn-sm" id="btn-cancel-add-sub">取消</button>
               <button class="btn btn-primary btn-sm" id="btn-submit-add-sub" ${subscriptionState.actionInProgress === 'add-sub' ? 'disabled' : ''}>
                 ${subscriptionState.actionInProgress === 'add-sub' ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('check', 'h-4 w-4')} 拉取并挂载
               </button>
@@ -730,7 +765,8 @@
           <div class="flex flex-col gap-2">
             <input id="input-nodes-name" class="input input-sm w-full" placeholder="前缀别名 (如: 自建香港)" value="${escapeHtml(subscriptionState.nodesInputName)}" />
             <textarea id="input-nodes-content" class="textarea textarea-sm w-full font-mono text-xs" rows="3" placeholder="支持批量粘贴: ss://, vmess://, vless://, trojan://, hy2://">${escapeHtml(subscriptionState.nodesInputContent)}</textarea>
-            <div class="flex justify-end">
+            <div class="flex justify-end gap-2">
+              <button class="btn btn-ghost btn-sm" id="btn-cancel-add-nodes">取消</button>
               <button class="btn btn-primary btn-sm" id="btn-submit-import-nodes" ${subscriptionState.actionInProgress === 'import-nodes' ? 'disabled' : ''}>
                 ${subscriptionState.actionInProgress === 'import-nodes' ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('check', 'h-4 w-4')} 解析并导入
               </button>
@@ -825,6 +861,12 @@
     `;
 
     // 4. 装配子页面主结构 (与原生页面同构: 吸顶 need-blur 顶栏 + p-3 正文)
+    // 捕获焦点与光标，防止异步拉取/重绘打断用户输入或拼音候选
+    const activeEl = document.activeElement;
+    const activeId = activeEl && activeEl.id ? activeEl.id : null;
+    const selStart = typeof activeEl?.selectionStart === 'number' ? activeEl.selectionStart : null;
+    const selEnd = typeof activeEl?.selectionEnd === 'number' ? activeEl.selectionEnd : null;
+
     pageContainer.innerHTML = `
       <div class="bg-base-100 need-blur fixed top-0 right-0 left-0 z-30 shadow-xs backdrop-blur-xl sticky md:bg-base-100/50">
         <div class="flex flex-wrap items-center gap-2 p-2">
@@ -842,6 +884,17 @@
       </div>
     `;
 
+    // 恢复焦点与光标位置
+    if (activeId && pageContainer.querySelector('#' + activeId)) {
+      const restoredEl = pageContainer.querySelector('#' + activeId);
+      try {
+        restoredEl.focus();
+        if (selStart !== null && selEnd !== null) {
+          restoredEl.setSelectionRange(selStart, selEnd);
+        }
+      } catch (e) { /* ignore non-text inputs */ }
+    }
+
     // 绑定交互事件
     pageContainer.querySelector('#btn-refresh-all-toolkit')?.addEventListener('click', () => {
       fetchEgressIp(true);
@@ -850,7 +903,7 @@
 
     pageContainer.querySelector('#btn-reprobe-egress')?.addEventListener('click', () => fetchEgressIp(true));
     pageContainer.querySelector('#btn-toggle-egress-details')?.addEventListener('click', () => {
-      egressDetailsOpen = !egressDetailsOpen;
+      egressBadgeState.detailsOpen = !egressBadgeState.detailsOpen;
       renderToolkitSubpage();
     });
 
@@ -859,10 +912,12 @@
       renderToolkitSubpage();
     });
 
-    pageContainer.querySelector('#btn-cancel-add-sub')?.addEventListener('click', () => {
+    const hideAddForm = () => {
       subscriptionState.addFormVisible = false;
       renderToolkitSubpage();
-    });
+    };
+    pageContainer.querySelector('#btn-cancel-add-sub')?.addEventListener('click', hideAddForm);
+    pageContainer.querySelector('#btn-cancel-add-nodes')?.addEventListener('click', hideAddForm);
 
     pageContainer.querySelector('#tab-switch-sub')?.addEventListener('click', () => {
       subscriptionState.activeTab = 'sub';
@@ -890,7 +945,7 @@
       const url = pageContainer.querySelector('#input-sub-url')?.value.trim();
       const filter = pageContainer.querySelector('#input-sub-filter')?.value.trim();
       if (!name || !url) {
-        alert('请完整填写订阅名称与 URL');
+        showToast('请完整填写订阅名称与 URL', 'warning');
         return;
       }
       addSubscriptionUrl(name, url, filter);
@@ -900,7 +955,7 @@
       const name = pageContainer.querySelector('#input-nodes-name')?.value.trim();
       const content = pageContainer.querySelector('#input-nodes-content')?.value.trim();
       if (!name || !content) {
-        alert('请填写别名前缀并粘贴节点分享链接');
+        showToast('请填写别名前缀并粘贴节点分享链接', 'warning');
         return;
       }
       importRawNodes(name, content);
