@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 # Environment variable support for directories and paths

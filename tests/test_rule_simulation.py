@@ -1,7 +1,6 @@
 """Unit tests for rules-reconciler rule simulation and DNS pollution detection."""
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 import tempfile
