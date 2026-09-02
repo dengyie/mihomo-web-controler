@@ -16,7 +16,7 @@ page.on('console', (m) => {
 try {
   // 1. 进入初始页面
   console.log('[1] Navigate to initial page...');
-  await page.goto(url, { waitUntil: 'load', timeout: 60000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(4000);
 
   // 2. 检查全局悬浮胶囊

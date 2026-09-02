@@ -534,7 +534,7 @@
     if (isToolkitRoute()) renderToolkitPage();
 
     try {
-      const apiEndpoint = getPanelApiBase('user-rules') + '/simulate?query=' + encodeURIComponent(query);
+      const apiEndpoint = getPanelApiBase('rules') + '/simulate?domain=' + encodeURIComponent(query);
       const res = await fetch(apiEndpoint, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json = await res.json();

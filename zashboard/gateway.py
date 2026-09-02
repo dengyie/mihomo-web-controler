@@ -709,7 +709,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        if method != 'POST':
+        if method not in ('GET', 'POST'):
             self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed'})
             return
 
@@ -722,22 +722,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(500, {'status': 'error', 'error': 'Rules reconciler module is unavailable'})
             return
 
-        length = int(self.headers.get('Content-Length', '0'))
-        body_bytes = self.rfile.read(length) if length else b''
-        payload = {}
-        if body_bytes:
-            try:
-                payload = json.loads(body_bytes.decode('utf-8'))
-            except Exception as e:
-                self.send_json(400, {'status': 'error', 'error': f'Invalid JSON body: {e}'})
-                return
+        domain = ''
+        config_path = None
 
-        domain = payload.get('domain')
+        if method == 'GET':
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            domain = (qs.get('domain') or qs.get('query') or [''])[0]
+            if qs.get('config_path'):
+                config_path = Path(qs['config_path'][0])
+        else:
+            length = int(self.headers.get('Content-Length', '0'))
+            body_bytes = self.rfile.read(length) if length else b''
+            payload = {}
+            if body_bytes:
+                try:
+                    payload = json.loads(body_bytes.decode('utf-8'))
+                except Exception as e:
+                    self.send_json(400, {'status': 'error', 'error': f'Invalid JSON body: {e}'})
+                    return
+            domain = payload.get('domain', '')
+            if payload.get('config_path'):
+                config_path = Path(payload['config_path'])
+
         if not domain or not isinstance(domain, str):
             self.send_json(400, {'status': 'error', 'error': "Missing or invalid required field 'domain'"})
             return
 
-        config_path = Path(payload['config_path']) if payload.get('config_path') else None
         res = reconciler.simulate_routing(domain.strip(), config_path)
         self.send_json(200 if res.get('success') else 400, {'status': 'ok' if res.get('success') else 'error', 'data': res})
         return
@@ -1159,7 +1170,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if rel_path.startswith('/panel/api/diagnostics'):
             return self._handle_diagnostics(method, rel_path)
 
-        if rel_path.startswith('/panel/api/rules/simulate'):
+        if rel_path.startswith('/panel/api/rules/simulate') or rel_path.startswith('/panel/api/user-rules/simulate'):
             return self._handle_rules_simulate(method, rel_path)
 
         if rel_path.startswith('/panel/api/user-rules'):
