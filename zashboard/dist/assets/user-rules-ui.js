@@ -473,11 +473,11 @@
   const TOOLKIT_LABEL = (() => {
     try {
       const lang = (localStorage.getItem('config/language') || 'zh-CN').toLowerCase();
-      if (lang.startsWith('zh-tw') || lang.startsWith('zh-hant')) return '網路工具箱';
-      if (lang.startsWith('en')) return 'Toolkit';
+      if (lang.startsWith('zh-tw') || lang.startsWith('zh-hant')) return '工具';
+      if (lang.startsWith('en')) return 'Tools';
       if (lang.startsWith('ru')) return 'Инструменты';
     } catch (e) { /* noop */ }
-    return '网络工具箱';
+    return '工具';
   })();
 
   function isSidebarCollapsed() {
@@ -628,6 +628,21 @@
       } else {
         menuUl.appendChild(item);
       }
+    }
+
+    // 核心动画优化：拦截 menuRef.querySelector，根除「切往 toolkit 时指示器先弹到顶部代理项再滑下」的缺陷。
+    // 原生 SideBar 的 f() 监听 d.name，在 toolkit 路由时 d.name='proxies'，原先会匹配到顶部代理项导致指示器跳顶。
+    // 此处精准代理 proxies 选择器重定向至 toolkit 项，让 Vue 内部直接计算 toolkit 坐标，实现原生的单次丝滑平移。
+    if (!menuUl.__toolkitQuerySelectorPatched) {
+      menuUl.__toolkitQuerySelectorPatched = true;
+      const origQuerySelector = menuUl.querySelector.bind(menuUl);
+      menuUl.querySelector = function (selector) {
+        if (isToolkitRoute() && typeof selector === 'string' && selector.includes('proxies')) {
+          const toolkitA = document.querySelector('#sidebar-item-toolkit > a');
+          if (toolkitA) return toolkitA;
+        }
+        return origQuerySelector(selector);
+      };
     }
 
     // 监听 Vue 对侧边栏 class/style 的改写，同帧内幂等纠偏
@@ -877,7 +892,7 @@
       <div class="bg-base-100 need-blur fixed top-0 right-0 left-0 z-30 shadow-xs backdrop-blur-xl sticky md:bg-base-100/50">
         <div class="flex flex-wrap items-center gap-2 p-2">
           ${nativeIcon('wrench', 'h-5 w-5 shrink-0')}
-          <span class="text-sm font-semibold">网络工具箱</span>
+          <span class="text-sm font-semibold">工具</span>
           <span class="text-xs text-base-content/40">${escapeHtml(activeBackendUuid.replace('backend-', '').replace('-default', ''))}</span>
           <div class="flex-1"></div>
           <button class="btn btn-circle btn-sm" id="btn-refresh-all-toolkit" aria-label="刷新数据">${nativeIcon('arrow-path', 'h-4 w-4')}</button>

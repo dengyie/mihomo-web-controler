@@ -307,7 +307,7 @@ const subpage = mockDoc.getElementById('zashboard-toolkit-page');
 assert.ok(subpage, 'Subpage container #zashboard-toolkit-page rendered');
 assert.strictEqual(subpage.style.display, 'flex', 'Toolkit subpage is displayed');
 assert.strictEqual(nativePage.style.display, 'none', 'Native page is hidden while on toolkit');
-assert.ok(subpage.innerHTML.includes('网络工具箱'), 'Subpage header rendered');
+assert.ok(subpage.innerHTML.includes('工具'), 'Subpage header rendered');
 assert.ok(subpage.innerHTML.includes('settings-grid'), 'Subpage uses native settings-grid layout');
 assert.ok(subpage.innerHTML.includes('need-blur'), 'Subpage uses native sticky topbar');
 assert.ok(subpage.innerHTML.includes('data-slot="icon"'), 'Subpage uses native Heroicons');
