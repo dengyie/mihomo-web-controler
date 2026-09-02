@@ -391,12 +391,137 @@
       });
     }
 
-    syncSidebarActive(isToolkit);
+    syncSidebarActive();
   }
 
   // ==========================================
   // 侧边栏菜单项注入与指示器高亮同步
+  // 严格复刻原生 SideBar 组件的全部行为：
+  //   1. active class 绑定: q([active?'sidebar-tab-active':'hover:bg-base-300!', cr&&'justify-center', 'relative z-10 py-2'])
+  //   2. 指示器 f(): 基准 = indicator.parentElement(navRef)，目标 = menu 里 [data-sidebar-route=d.name] > a
+  //   3. 收起态 hover tooltip（tippy-box, placement right）
+  //   4. 展开态文字 label（a 内 svg 后的纯文本节点）
   // ==========================================
+  const TOOLKIT_LABEL = (() => {
+    try {
+      const lang = (localStorage.getItem('config/language') || 'zh-CN').toLowerCase();
+      if (lang.startsWith('zh-tw') || lang.startsWith('zh-hant')) return '網路工具箱';
+      if (lang.startsWith('en')) return 'Toolkit';
+      if (lang.startsWith('ru')) return 'Инструменты';
+    } catch (e) { /* noop */ }
+    return '网络工具箱';
+  })();
+
+  function isSidebarCollapsed() {
+    const home = document.querySelector('.home-page');
+    return home ? home.classList.contains('sidebar-collapsed') : true;
+  }
+
+  function currentNativeRoute() {
+    const m = (location.hash || '').match(/^#\/([a-z-]+)/i);
+    return m ? m[1].toLowerCase() : 'proxies';
+  }
+
+  function setClassIfChanged(el, cls) {
+    if (el && el.className !== cls) el.className = cls;
+  }
+
+  // 指示器：完全复刻原生 f() 的坐标算法（含字符串格式），幂等写入
+  function syncIndicator() {
+    const indicator = document.querySelector('.sidebar-tab-indicator');
+    const nav = indicator?.parentElement;
+    const menu = document.querySelector('ul.sidebar-route-menu');
+    if (!indicator || !nav || !menu) return;
+
+    const route = isToolkitRoute() ? 'toolkit' : currentNativeRoute();
+    const targetA = route === 'toolkit'
+      ? menu.querySelector('#sidebar-item-toolkit > a')
+      : menu.querySelector(`li[data-sidebar-route="${route}"] > a`);
+    if (!targetA) return;
+
+    const r = nav.getBoundingClientRect();
+    const o = targetA.getBoundingClientRect();
+    if (!o.width || !o.height) return;
+
+    const transform = `translate3d(${o.left - r.left}px, ${o.top - r.top}px, 0)`;
+    const width = `${o.width}px`;
+    const height = `${o.height}px`;
+    if (indicator.style.transform !== transform) indicator.style.transform = transform;
+    if (indicator.style.width !== width) indicator.style.width = width;
+    if (indicator.style.height !== height) indicator.style.height = height;
+    if (indicator.style.opacity !== '1') indicator.style.opacity = '1';
+  }
+
+  // 同步整个侧边栏（含原生项恢复，根治「toolkit 返回同名路由后 sidebar-tab-active 永久丢失」）
+  function syncSidebarActive() {
+    const menuUl = document.querySelector('ul.sidebar-route-menu');
+    if (!menuUl) return;
+    const collapsed = isSidebarCollapsed();
+    const toolkitActive = isToolkitRoute();
+    const nativeRoute = currentNativeRoute();
+
+    menuUl.querySelectorAll('li[data-sidebar-route]').forEach((li) => {
+      const a = li.querySelector('a');
+      if (!a) return;
+      if (li.id === 'sidebar-item-toolkit') {
+        setClassIfChanged(a, buildSidebarAClass(toolkitActive, collapsed));
+        syncToolkitItemContent(a, collapsed);
+      } else {
+        // toolkit 激活时原生项全部取消高亮；离开 toolkit 后按当前路由恢复
+        // （同名路由返回时 Vue vdom diff 认为类未变化不会重写 DOM，必须由我们恢复）
+        const active = !toolkitActive && li.getAttribute('data-sidebar-route') === nativeRoute;
+        setClassIfChanged(a, buildSidebarAClass(active, collapsed));
+      }
+    });
+
+    syncIndicator();
+  }
+
+  function buildSidebarAClass(active, collapsed) {
+    return `${active ? 'sidebar-tab-active' : 'hover:bg-base-300!'}${collapsed ? ' justify-center' : ''} relative z-10 py-2`;
+  }
+
+  // toolkit 项内容：收起=仅图标；展开=图标+文字节点（复刻原生 gt(U($t(t)),1)）
+  function syncToolkitItemContent(a, collapsed) {
+    if (!a) return;
+    if (collapsed) {
+      Array.from(a.childNodes).forEach((n) => {
+        if (n.nodeType === 3 && n.textContent.trim()) a.removeChild(n);
+      });
+    } else {
+      const hasLabel = Array.from(a.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
+      if (!hasLabel && document.createTextNode) {
+        a.appendChild(document.createTextNode(TOOLKIT_LABEL));
+      }
+    }
+  }
+
+  // 复刻原生收起态 hover tooltip（复用原生 tippy-box 样式，右侧弹出）
+  function showToolkitTooltip(li) {
+    if (!isSidebarCollapsed()) return;
+    hideToolkitTooltip();
+    const tip = document.createElement('div');
+    tip.id = 'toolkit-sidebar-tooltip';
+    tip.className = 'tippy-box';
+    tip.setAttribute('data-animation', 'scale');
+    tip.setAttribute('data-placement', 'right');
+    tip.setAttribute('data-state', 'visible');
+    tip.textContent = TOOLKIT_LABEL;
+    tip.style.position = 'fixed';
+    tip.style.zIndex = '9999';
+    tip.style.pointerEvents = 'none';
+    const host = document.getElementById('app-content') || document.body;
+    host.appendChild(tip);
+    const r = li.getBoundingClientRect();
+    tip.style.left = `${Math.round(r.right + 10)}px`;
+    tip.style.top = `${Math.round(r.top + r.height / 2)}px`;
+    tip.style.transform = 'translateY(-50%)';
+  }
+
+  function hideToolkitTooltip() {
+    document.getElementById('toolkit-sidebar-tooltip')?.remove();
+  }
+
   function injectSidebarItem() {
     const menuUl = document.querySelector('ul.sidebar-route-menu');
     if (!menuUl) return;
@@ -407,26 +532,26 @@
       item.id = 'sidebar-item-toolkit';
       item.setAttribute('data-sidebar-route', 'toolkit');
       item.innerHTML = `
-        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/proxies?tab=toolkit">
+        <a class="hover:bg-base-300! justify-center relative z-10 py-2" href="#/proxies?tab=toolkit">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" data-slot="icon" class="h-5 w-5">
             <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.32l-3.232 3.232a1.875 1.875 0 0 1-2.652-2.652L21 3.232A4.5 4.5 0 0 0 14.68 7.72c.047.58.024 1.192-.14 1.742m0 0a4.872 4.872 0 0 1-1.42 2.496l-3.03 2.496"></path>
           </svg>
         </a>
       `;
 
-      // 捕获阶段拦截点击，阻止原生 Vue Router 冒泡覆盖 hash
+      // 捕获阶段拦截点击，阻止原生 Vue Router 对未注册路由的 catchAll 重定向
       item.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
         location.hash = '#/proxies?tab=toolkit';
+        hideToolkitTooltip();
         syncToolkitView();
       }, true);
 
-      // hover 到 toolkit 项时同步指示器
-      item.addEventListener('mouseenter', () => {
-        syncSidebarActive(true);
-      });
+      // 复刻原生收起态 hover tooltip
+      item.addEventListener('mouseenter', () => showToolkitTooltip(item));
+      item.addEventListener('mouseleave', hideToolkitTooltip);
 
       // 插入在设置（最后一个）之前
       const lastLi = menuUl.lastElementChild;
@@ -437,52 +562,30 @@
       }
     }
 
-    // 监听整个侧边栏 mouseleave，在处于 toolkit 时复位 indicator
-    if (!menuUl.dataset.toolkitListenerAttached) {
-      menuUl.dataset.toolkitListenerAttached = 'true';
-      menuUl.addEventListener('mouseleave', () => {
-        if (isToolkitRoute()) {
-          setTimeout(() => syncSidebarActive(true), 50);
-        }
+    // 监听 Vue 对侧边栏 class/style 的改写，同帧内幂等纠偏
+    // （写入前先比较，值一致时不写 → 观察者收敛，无死循环）
+    if (!menuUl.dataset.toolkitObserverAttached && typeof MutationObserver !== 'undefined') {
+      menuUl.dataset.toolkitObserverAttached = 'true';
+      let rafPending = false;
+      const observer = new MutationObserver(() => {
+        if (rafPending) return;
+        rafPending = true;
+        requestAnimationFrame(() => {
+          rafPending = false;
+          syncSidebarActive();
+        });
       });
+      observer.observe(menuUl, { attributes: true, attributeFilter: ['class', 'style'], subtree: true });
+
+      // 侧边栏展开/收起（.home-page class 切换）时同步 label/justify-center
+      const home = document.querySelector('.home-page');
+      if (home) {
+        const homeObserver = new MutationObserver(() => syncSidebarActive());
+        homeObserver.observe(home, { attributes: true, attributeFilter: ['class'] });
+      }
     }
 
-    syncSidebarActive(isToolkitRoute());
-  }
-
-  function syncSidebarActive(isToolkit) {
-    const item = document.getElementById('sidebar-item-toolkit');
-    if (!item) return;
-    const a = item.querySelector('a');
-    const indicator = document.querySelector('.sidebar-tab-indicator');
-    const menuUl = document.querySelector('ul.sidebar-route-menu');
-
-    if (isToolkit) {
-      if (a) {
-        a.classList.add('sidebar-tab-active');
-        a.classList.remove('hover:bg-base-300!');
-      }
-      // 清除其它原生菜单项的 sidebar-tab-active，避免双重高亮
-      document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) > a').forEach((el) => {
-        el.classList.remove('sidebar-tab-active');
-        el.classList.add('hover:bg-base-300!');
-      });
-
-      // 采用与 Vue SideBar 完全一致的相对物理坐标算法
-      if (indicator && menuUl && a) {
-        const r = menuUl.getBoundingClientRect();
-        const o = a.getBoundingClientRect();
-        indicator.style.transform = `translate3d(${Math.round(o.left - r.left)}px, ${Math.round(o.top - r.top)}px, 0px)`;
-        indicator.style.width = `${Math.round(o.width)}px`;
-        indicator.style.height = `${Math.round(o.height)}px`;
-        indicator.style.opacity = '1';
-      }
-    } else {
-      if (a) {
-        a.classList.remove('sidebar-tab-active');
-        a.classList.add('hover:bg-base-300!');
-      }
-    }
+    syncSidebarActive();
   }
 
   // ==========================================
