@@ -19,6 +19,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -38,6 +39,29 @@ LOCK_FILE = ROOT / 'subscriptions/.subscription.lock'
 
 # Default regex pattern to filter out announcement / non-functional nodes
 DEFAULT_EXCLUDE_FILTER = r'(剩余流量|更新日期|官网|套餐|重置|到期|过期|公告|流量|时间|群|客服|traffic|expire|reset|website|notice)'
+
+
+def safe_atomic_write(target_path: Path, content: str, encoding: str = 'utf-8', mode: int = 0o660) -> None:
+    """Atomically write content to target_path using unique temporary file and safe permissions."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tf = tempfile.NamedTemporaryFile('w', dir=target_path.parent, delete=False, encoding=encoding)
+    try:
+        tf.write(content)
+        tf.flush()
+        try:
+            os.fchmod(tf.fileno(), mode)
+        except OSError:
+            pass
+        tf.close()
+        os.replace(tf.name, target_path)
+    except Exception:
+        if os.path.exists(tf.name):
+            try:
+                os.remove(tf.name)
+            except OSError:
+                pass
+        raise
+
 
 # Group name for auto-mounted subscription proxies
 SUB_GROUP_NAME = '🌐 订阅导入'
@@ -168,10 +192,8 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
                     g_proxies.append(SUB_GROUP_NAME)
 
     # Write atomically
-    tmp = target_path.with_suffix('.tmp')
     rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
-    tmp.write_text(rendered)
-    os.replace(tmp, target_path)
+    safe_atomic_write(target_path, rendered)
     return True
 
 
@@ -729,9 +751,8 @@ class SubscriptionEngine:
         return ""
 
     def save_cached_content(self, sub_id: str, content: str) -> None:
-        self.raw_cache_dir.mkdir(parents=True, exist_ok=True)
         cache_p = self._get_cache_path(sub_id)
-        cache_p.write_text(content, encoding='utf-8')
+        safe_atomic_write(cache_p, content)
 
     def load_meta(self) -> Dict[str, Any]:
         if not self.meta_file.exists():
@@ -747,10 +768,8 @@ class SubscriptionEngine:
         return {'version': 1, 'subscriptions': []}
 
     def save_meta(self, data: Dict[str, Any]) -> None:
-        self.meta_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.meta_file.with_suffix('.tmp')
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-        os.replace(tmp, self.meta_file)
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        safe_atomic_write(self.meta_file, content)
 
     def fetch_url(self, url: str, timeout: int = 15) -> str:
         """Fetch subscription content from HTTP/HTTPS URL with proper User-Agent and SSRF protection."""
@@ -983,11 +1002,8 @@ class SubscriptionEngine:
             'proxies': all_proxies,
         }
 
-        self.merged_output_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.merged_output_file.with_suffix('.tmp')
         rendered = yaml.safe_dump(merged_doc, allow_unicode=True, sort_keys=False, width=120)
-        tmp.write_text(rendered)
-        os.replace(tmp, self.merged_output_file)
+        safe_atomic_write(self.merged_output_file, rendered)
 
         # Reconcile target configs (config.yaml, config.mac-merged.yaml) if they exist
         targets_updated = []

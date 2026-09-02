@@ -46,6 +46,8 @@ class MockElement {
     this.oninput = null;
     this.onkeydown = null;
     this.onchange = null;
+    this.value = '';
+    this.listeners = new Map();
   }
 
   getAttribute(name) {
@@ -54,6 +56,21 @@ class MockElement {
 
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
+  }
+
+  addEventListener(event, handler) {
+    if (!this.listeners.has(event)) this.listeners.set(event, []);
+    this.listeners.get(event).push(handler);
+  }
+
+  dispatchEvent(event) {
+    const list = this.listeners.get(event.type) || [];
+    for (const h of list) h(event);
+    if (event.type === 'click' && this.onclick) this.onclick(event);
+  }
+
+  click() {
+    this.dispatchEvent({ type: 'click', currentTarget: this, target: this, preventDefault: () => {}, stopPropagation: () => {} });
   }
 
   get textContent() {
@@ -71,49 +88,15 @@ class MockElement {
   set innerHTML(html) {
     this._innerHTML = html;
     this.children = [];
-    
-    // Simple tokenizer to construct the DOM tree
-    const tagRegex = /<([a-zA-Z0-9-]+)([^>]*?)(\/?)>|([^<]+)|<\/([a-zA-Z0-9-]+)>/g;
-    const stack = [this];
+
+    // Simple parser to extract IDs and classes for querySelector
+    const idRegex = /id=["']([^"']+)["']/g;
     let m;
-    while ((m = tagRegex.exec(html)) !== null) {
-      if (m[1]) {
-        // Open tag
-        const tagName = m[1];
-        const attrStr = m[2] || '';
-        const isSelfClosing = m[3] === '/' || ['input', 'img', 'br', 'hr'].includes(tagName.toLowerCase());
-        const child = new MockElement(tagName);
-        child.parentElement = stack[stack.length - 1];
-
-        const idMatch = attrStr.match(/id=["']([^"']+)["']/i);
-        if (idMatch) child.id = idMatch[1];
-
-        const classMatch = attrStr.match(/class=["']([^"']+)["']/i);
-        if (classMatch) child.className = classMatch[1];
-
-        const phMatch = attrStr.match(/placeholder=["']([^"']+)["']/i);
-        if (phMatch) child.setAttribute('placeholder', phMatch[1]);
-
-        const dataDelMatch = attrStr.match(/data-delete-id=["']([^"']+)["']/i);
-        if (dataDelMatch) child.setAttribute('data-delete-id', dataDelMatch[1]);
-
-        const dataSubMatch = attrStr.match(/data-sub-id=["']([^"']+)["']/i);
-        if (dataSubMatch) child.setAttribute('data-sub-id', dataSubMatch[1]);
-
-        const valMatch = attrStr.match(/value=["']([^"']+)["']/i);
-        if (valMatch) child.value = valMatch[1];
-
-        stack[stack.length - 1].children.push(child);
-
-        if (!isSelfClosing) {
-          stack.push(child);
-        }
-      } else if (m[5]) {
-        // Close tag
-        if (stack.length > 1 && stack[stack.length - 1].tagName.toLowerCase() === m[5].toLowerCase()) {
-          stack.pop();
-        }
-      }
+    while ((m = idRegex.exec(html)) !== null) {
+      const child = new MockElement('div');
+      child.id = m[1];
+      child.parentElement = this;
+      this.children.push(child);
     }
   }
 
@@ -123,122 +106,93 @@ class MockElement {
     return child;
   }
 
-  removeChild(child) {
-    const idx = this.children.indexOf(child);
-    if (idx !== -1) {
-      this.children.splice(idx, 1);
-      child.parentElement = null;
+  insertBefore(newChild, refChild) {
+    newChild.parentElement = this;
+    const idx = this.children.indexOf(refChild);
+    if (idx === -1) {
+      this.children.push(newChild);
+    } else {
+      this.children.splice(idx, 0, newChild);
     }
-    return child;
+    return newChild;
+  }
+
+  insertAdjacentElement(position, element) {
+    element.parentElement = this.parentElement;
+    if (!this.parentElement) return;
+    const parentChildren = this.parentElement.children;
+    const idx = parentChildren.indexOf(this);
+    if (position === 'beforebegin') {
+      if (idx !== -1) parentChildren.splice(idx, 0, element);
+      else parentChildren.push(element);
+    } else if (position === 'afterend') {
+      if (idx !== -1) parentChildren.splice(idx + 1, 0, element);
+      else parentChildren.push(element);
+    } else if (position === 'afterbegin') {
+      this.children.unshift(element);
+      element.parentElement = this;
+    } else if (position === 'beforeend') {
+      this.children.push(element);
+      element.parentElement = this;
+    }
   }
 
   remove() {
     if (this.parentElement) {
-      this.parentElement.removeChild(this);
-    }
-  }
-
-  insertAdjacentElement(position, el) {
-    if (!this.parentElement) return;
-    const siblings = this.parentElement.children;
-    const idx = siblings.indexOf(this);
-    el.parentElement = this.parentElement;
-    if (position === 'beforebegin') {
-      siblings.splice(idx, 0, el);
-    } else if (position === 'afterbegin') {
-      this.children.unshift(el);
-      el.parentElement = this;
-    } else if (position === 'afterend') {
-      siblings.splice(idx + 1, 0, el);
+      const idx = this.parentElement.children.indexOf(this);
+      if (idx !== -1) this.parentElement.children.splice(idx, 1);
+      this.parentElement = null;
     }
   }
 
   querySelector(selector) {
-    const all = this.querySelectorAll(selector);
-    return all.length > 0 ? all[0] : null;
+    return this.querySelectorAll(selector)[0] || null;
   }
 
   querySelectorAll(selector) {
     const results = [];
-    const subSelectors = selector.split(',').map(s => s.trim());
-    const matchSingle = (child, sel) => {
-      const target = sel.includes('>') ? sel.split('>').pop().trim() : sel;
-      if (target.startsWith('#') && child.id === target.slice(1)) return true;
-      if (target.startsWith('.') && child.className && child.className.includes(target.slice(1))) return true;
-      if (target.startsWith('[') && target.endsWith(']')) return child.attributes.has(target.slice(1, -1));
-      if (child.tagName.toLowerCase() === target.toLowerCase()) return true;
-      return false;
-    };
-    const walk = (node) => {
+    const search = (node) => {
       for (const child of node.children) {
-        if (subSelectors.some(s => matchSingle(child, s))) {
-          results.push(child);
-        }
-        walk(child);
+        let match = false;
+        if (selector.startsWith('#') && child.id === selector.slice(1)) match = true;
+        else if (selector.startsWith('.') && child.className.includes(selector.slice(1))) match = true;
+        else if (child.tagName.toLowerCase() === selector.toLowerCase()) match = true;
+        else if (selector.includes('.') && child.tagName.toLowerCase() === selector.split('.')[0].toLowerCase() && child.className.includes(selector.split('.')[1])) match = true;
+        else if (selector.includes(child.id) && child.id) match = true;
+
+        if (match) results.push(child);
+        search(child);
       }
     };
-    walk(this);
+    search(this);
     return results;
   }
-
-  closest(selector) {
-    let curr = this;
-    while (curr) {
-      if (curr.className && selector.split(',').some(s => curr.className.includes(s.trim().replace('.', '')))) {
-        return curr;
-      }
-      curr = curr.parentElement;
-    }
-    return null;
-  }
-
-  contains(node) {
-    if (!node) return false;
-    let curr = node;
-    while (curr) {
-      if (curr === this) return true;
-      curr = curr.parentElement;
-    }
-    return false;
-  }
-  addEventListener(event, handler) {
-    this['on' + event] = handler;
-  }
-  removeEventListener() {}
-  scrollIntoView() {}
-  classList = {
-    add: (cls) => { this.className = (this.className + ' ' + cls).trim(); },
-    remove: (cls) => { this.className = (this.className || '').replace(cls, '').trim(); },
-    contains: (cls) => (this.className || '').includes(cls),
-  };
 }
 
-const mockDoc = {
-  head: new MockElement('head'),
-  body: new MockElement('body'),
-  documentElement: new MockElement('html'),
-  createElement: (tag) => new MockElement(tag),
-  getElementById: function(id) {
-    const find = (node) => {
-      if (node.id === id) return node;
-      for (const c of node.children) {
-        const res = find(c);
-        if (res) return res;
-      }
-      return null;
-    };
-    return find(this.body) || find(this.head);
-  },
-  querySelector: function(sel) {
-    return this.body.querySelector(sel) || this.head.querySelector(sel);
-  },
-  querySelectorAll: function(sel) {
-    return [...this.body.querySelectorAll(sel), ...this.head.querySelectorAll(sel)];
-  },
-};
-mockDoc.documentElement.appendChild(mockDoc.head);
-mockDoc.documentElement.appendChild(mockDoc.body);
+class MockDocument {
+  constructor() {
+    this.head = new MockElement('head');
+    this.body = new MockElement('body');
+  }
 
+  createElement(tagName) {
+    return new MockElement(tagName);
+  }
+
+  getElementById(id) {
+    return this.body.querySelector('#' + id) || (this.head.querySelector('#' + id)) || null;
+  }
+
+  querySelector(selector) {
+    return this.body.querySelector(selector) || this.head.querySelector(selector) || null;
+  }
+
+  querySelectorAll(selector) {
+    return [...this.head.querySelectorAll(selector), ...this.body.querySelectorAll(selector)];
+  }
+}
+
+const mockDoc = new MockDocument();
 global.document = mockDoc;
 
 class MockMutationObserver {
@@ -261,24 +215,26 @@ global.fetch = async (url, opts = {}) => {
         data: {
           success: true,
           fastest: {
-            source: 'ipinfo.io',
+            source: 'ip-api.com',
             latency_ms: 45.2,
             data: {
-              ip: '104.28.19.88',
-              country: 'US',
-              city: 'San Jose',
-              org: 'Cloudflare, Inc.',
-            },
+              ip: '104.28.19.45',
+              country: 'Hong Kong',
+              country_code: 'HK',
+              city: 'Hong Kong',
+              isp: 'Cloudflare, Inc.',
+              asn: '13335',
+            }
           },
           all_results: [
-            { source: 'ipinfo.io', latency_ms: 45.2, data: { ip: '104.28.19.88' } },
-            { source: 'cloudflare', latency_ms: 55.1, data: { ip: '104.28.19.88' } },
-          ],
-        },
-      }),
+            { source: 'ip-api.com', success: true, latency_ms: 45.2 },
+            { source: 'cloudflare', success: true, latency_ms: 55.1 }
+          ]
+        }
+      })
     };
   }
-  if (url.includes('/subscriptions') && !opts.method) {
+  if (url.includes('/subscriptions')) {
     return {
       ok: true,
       status: 200,
@@ -293,14 +249,14 @@ global.fetch = async (url, opts = {}) => {
               url: 'https://example.com/sub',
               node_count: 35,
               enabled: true,
-              updated_at: '2025-09-02T12:00:00',
+              updated_at: '2026-09-02T12:00:00',
             }
           ]
         }
       })
     };
   }
-  if (url.includes('/rules/simulate')) {
+  if (url.includes('/simulate')) {
     return {
       ok: true,
       status: 200,
@@ -326,15 +282,29 @@ global.fetch = async (url, opts = {}) => {
   return {
     ok: true,
     status: 200,
-    json: async () => ({ status: 'ok', rules: [], available_targets: ['DIRECT', 'PROXY', 'REJECT'] }),
+    json: async () => ({ status: 'ok', rules: [], targets: ['DIRECT', 'PROXY', 'REJECT'] }),
   };
 };
 
-// Seed Header and Rules toolbar in mock DOM
-const header = new MockElement('header');
-header.className = 'navbar';
-mockDoc.body.appendChild(header);
+// Seed zashboard DOM Structure: .home-page with sidebar menu and main content area
+const homePage = new MockElement('div');
+homePage.className = 'home-page';
 
+const sidebarCol = new MockElement('div');
+const sidebarMenu = new MockElement('ul');
+sidebarMenu.className = 'sidebar-route-menu menu';
+sidebarCol.appendChild(sidebarMenu);
+homePage.appendChild(sidebarCol);
+
+const mainContent = new MockElement('div');
+mainContent.className = 'relative flex-1';
+homePage.appendChild(mainContent);
+
+mockDoc.body.appendChild(homePage);
+
+// Also seed rules toolbar
+const rulesContainer = new MockElement('div');
+rulesContainer.className = 'rules-container';
 const toolbar = new MockElement('div');
 toolbar.className = 'toolbar';
 const searchInput = new MockElement('input');
@@ -343,102 +313,44 @@ const gearBtn = new MockElement('button');
 gearBtn.className = 'btn-circle btn-sm';
 toolbar.appendChild(searchInput);
 toolbar.appendChild(gearBtn);
-mockDoc.body.appendChild(toolbar);
+rulesContainer.appendChild(toolbar);
+mockDoc.body.appendChild(rulesContainer);
 
 // Execute bundle
 eval(uiSrc);
 
 // Assertions
 assert.ok(mockDoc.getElementById('user-rules-custom-styles'), 'Custom styles injected');
-assert.ok(mockDoc.getElementById('egress-ip-badge-container'), 'EgressBadge injected into header');
-assert.ok(mockDoc.getElementById('sub-manager-top-action-btn'), 'SubManager button injected in rules toolbar');
-assert.ok(mockDoc.getElementById('user-rules-top-action-btn'), 'UserRules button injected in rules toolbar');
-assert.ok(mockDoc.getElementById('rule-simulator-bar-container'), 'RuleSimulator bar injected on #/rules');
+assert.ok(mockDoc.getElementById('zashboard-floating-egress-pill'), 'Global Floating Egress Pill injected');
+assert.ok(mockDoc.getElementById('sidebar-item-toolkit'), 'Sidebar toolkit navigation item injected');
+assert.ok(mockDoc.getElementById('user-rules-top-action-btn'), 'UserRules button injected on #/rules');
 
-console.log('✅ UI Injection asserts passed');
+console.log('✅ Base UI Injection asserts passed');
 
-// Test SubManager Modal Open
-const subBtn = mockDoc.getElementById('sub-manager-top-action-btn');
-subBtn.onclick({ stopPropagation: () => {} });
-assert.ok(mockDoc.getElementById('sub-manager-modal'), 'SubManager modal opened on button click');
-console.log('✅ SubManager Modal Open test passed');
-
-// Test Rule Simulator Execution
-const runSimBtn = mockDoc.getElementById('btn-run-rule-sim');
-const simInput = mockDoc.getElementById('rule-sim-input');
-if (simInput) simInput.value = 'api.openai.com';
-if (runSimBtn) runSimBtn.onclick();
-
-console.log('✅ Rule Simulator Trigger test passed');
-
-// Test Egress Popover
-const egressBadge = mockDoc.getElementById('egress-ip-badge-container');
-egressBadge.onclick({ stopPropagation: () => {} });
-assert.ok(mockDoc.getElementById('egress-popover-card'), 'Egress Popover opened on badge click');
-console.log('✅ Egress Popover Open test passed');
-
-// Test SubManager Modal Tabs & Operations
-const modalEl = mockDoc.getElementById('sub-manager-modal');
-assert.ok(modalEl, 'SubManager Modal DOM element present');
-
-// Switch to raw import tab
-const rawTab = modalEl.querySelector('#tab-sub-raw');
-assert.ok(rawTab, 'Raw import tab present');
-rawTab.onclick();
-assert.ok(modalEl.querySelector('#sub-raw-content'), 'Raw import textarea present after tab switch');
-
-// Switch back to URL tab
-const urlTab = modalEl.querySelector('#tab-sub-url');
-assert.ok(urlTab, 'URL import tab present');
-urlTab.onclick();
-assert.ok(modalEl.querySelector('#sub-add-url'), 'URL input present after switching back');
-
-console.log('✅ SubManager Tab Switching test passed');
-
-// Test Subscription URL submission
-modalEl.querySelector('#sub-add-name').value = 'Test Sub';
-modalEl.querySelector('#sub-add-url').value = 'https://example.com/sub.yaml';
-const btnSubmitUrl = modalEl.querySelector('#btn-submit-sub-url');
-assert.ok(btnSubmitUrl, 'Submit URL button present');
-await btnSubmitUrl.onclick();
-assert.ok(fetchCalls.some(c => c.url.includes('/subscriptions') && c.opts.method === 'POST'), 'POST /subscriptions called');
-console.log('✅ SubManager URL Add Submission test passed');
-
-// Test Subscription Toggle
-const toggleBtn = modalEl.querySelector('.sub-toggle-btn');
-if (toggleBtn) {
-  toggleBtn.onchange({ target: { checked: false } });
-  assert.ok(fetchCalls.some(c => c.url.includes('/toggle')), 'POST /toggle called');
-  console.log('✅ SubManager Toggle test passed');
+// Test Navigation to #/toolkit
+global.location.hash = '#/toolkit';
+// trigger listeners or loop
+if (windowEvents.has('hashchange')) {
+  for (const fn of windowEvents.get('hashchange')) fn();
 }
 
-// Test Subscription Update
-const updateBtn = modalEl.querySelector('.sub-update-btn');
-if (updateBtn) {
-  await updateBtn.onclick();
-  assert.ok(fetchCalls.some(c => c.url.includes('/update')), 'POST /update called');
-  console.log('✅ SubManager Update test passed');
-}
+assert.ok(mockDoc.getElementById('zashboard-toolkit-view'), 'Toolkit view container injected on #/toolkit');
+const toolkitView = mockDoc.getElementById('zashboard-toolkit-view');
+assert.ok(toolkitView.children.length > 0, 'Toolkit view has child sections rendered');
 
-// Test UserRules Add & Modal
+console.log('✅ #/toolkit View Activation & Rendering asserts passed');
+
+// Test UserRules Modal on #/rules
+global.location.hash = '#/rules';
+if (windowEvents.has('hashchange')) {
+  for (const fn of windowEvents.get('hashchange')) fn();
+}
 const rulesBtn = mockDoc.getElementById('user-rules-top-action-btn');
-rulesBtn.onclick({ stopPropagation: () => {} });
-const rulesModal = mockDoc.getElementById('user-rules-manager-modal');
-assert.ok(rulesModal, 'UserRules modal present');
-const addRuleBtn = rulesModal.querySelector('#btn-go-add');
-assert.ok(addRuleBtn, 'Add rule button present');
-addRuleBtn.onclick();
-assert.ok(rulesModal.querySelector('#modal-rule-payload'), 'Payload input present in add view');
-console.log('✅ UserRules Modal Navigation test passed');
+assert.ok(rulesBtn, 'UserRules button present on #/rules');
+rulesBtn.click();
+assert.ok(mockDoc.getElementById('user-rules-manager-modal'), 'UserRules modal opened on click');
 
-// Test XSS safety
-const testXss = '<script>alert(1)</script>';
-mockDoc.body.innerHTML = '';
-toolbar.innerHTML = '';
-toolbar.appendChild(searchInput);
-toolbar.appendChild(gearBtn);
-mockDoc.body.appendChild(header);
-mockDoc.body.appendChild(toolbar);
+console.log('✅ UserRules Modal asserts passed');
 
 console.log('🎉 All frontend UI unit tests passed successfully!');
 process.exit(0);

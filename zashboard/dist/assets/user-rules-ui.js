@@ -1,46 +1,45 @@
+// zashboard 自定义规则管理、独立工具箱页面与网络聚合套件
+// 源码: zashboard/src/user-rules-ui.js
+// 构建脚本: scripts/build-ui.mjs -> zashboard/dist/assets/user-rules-ui.js
 (function () {
   'use strict';
 
   function escapeHtml(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>"']/g, (s) => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-    }[s]));
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
-  // Country code to Flag emoji mapping
   function getFlagEmoji(countryCode) {
     if (!countryCode || countryCode.length !== 2) return '🌐';
-    const code = countryCode.toUpperCase();
-    const first = code.codePointAt(0) - 0x41 + 0x1F1E6;
-    const second = code.codePointAt(1) - 0x41 + 0x1F1E6;
-    if (first >= 0x1F1E6 && first <= 0x1F1FF && second >= 0x1F1E6 && second <= 0x1F1FF) {
-      return String.fromCodePoint(first, second);
-    }
-    return '🌐';
+    const codePoints = countryCode
+      .toUpperCase()
+      .split('')
+      .map((char) => 127397 + char.charCodeAt(0));
+    return String.fromCodePoint(...codePoints);
   }
 
-  // Inject Styles for Custom Panels & Badges
+  // Inject Styles for Custom Panels, Badges, Toolkit View & Pills
   const style = document.createElement('style');
   style.id = 'user-rules-custom-styles';
   style.textContent = `
     .user-rules-modal-backdrop {
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.5);
+      background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(4px);
       display: flex;
       align-items: center;
       justify-content: center;
       z-index: 99999;
-      animation: urModalFadeIn 0.15s ease-out;
+      animation: urFadeIn 0.15s ease-out;
     }
-    @keyframes urModalFadeIn {
-      from { opacity: 0; transform: scale(0.97); }
+    @keyframes urFadeIn {
+      from { opacity: 0; transform: scale(0.98); }
       to { opacity: 1; transform: scale(1); }
     }
     .user-rules-modal-content {
@@ -52,7 +51,7 @@
       display: flex;
       flex-direction: column;
       border-radius: var(--rounded-box, 1rem);
-      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.25), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
       border: 1px solid rgba(128, 128, 128, 0.2);
       overflow: hidden;
     }
@@ -73,7 +72,7 @@
       overflow-y: auto;
       flex: 1;
     }
-    #user-rules-top-action-btn, #sub-manager-top-action-btn {
+    #user-rules-top-action-btn {
       display: inline-flex !important;
       align-items: center;
       justify-content: center;
@@ -81,63 +80,90 @@
       margin-right: 6px;
       flex-shrink: 0;
     }
-    #egress-ip-badge-container {
+
+    /* 全局悬浮出口 IP 胶囊 (Floating Pill) */
+    #zashboard-floating-egress-pill {
+      position: fixed;
+      bottom: 22px;
+      right: 22px;
+      z-index: 9999;
       display: inline-flex;
       align-items: center;
-      margin-left: 8px;
-      margin-right: 8px;
-      vertical-align: middle;
-      font-size: 11px;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 9999px;
       cursor: pointer;
       user-select: none;
-      transition: opacity 0.2s ease, transform 0.15s ease;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      background: rgba(255, 255, 255, 0.88);
+      color: #1f2937;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
+      border: 1px solid rgba(128, 128, 128, 0.25);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    #egress-ip-badge-container:hover {
-      transform: translateY(-1px);
+    .dark #zashboard-floating-egress-pill, [data-theme='dark'] #zashboard-floating-egress-pill {
+      background: rgba(29, 35, 42, 0.88);
+      color: #e5e7eb;
+      border-color: rgba(255, 255, 255, 0.12);
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
     }
-    .egress-popover-card {
-      position: absolute;
-      top: 100%;
-      right: 0;
-      margin-top: 8px;
-      width: 290px;
+    #zashboard-floating-egress-pill:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    }
+    #zashboard-floating-egress-pill:active {
+      transform: translateY(0);
+    }
+
+    /* 独立工具箱视图容器样式 */
+    #zashboard-toolkit-view {
+      height: 100%;
+      width: 100%;
+      overflow-y: auto;
+      box-sizing: border-box;
+      animation: urFadeIn 0.18s ease-out;
+    }
+    .toolkit-card {
       background: var(--fallback-b1, #ffffff);
-      color: var(--fallback-bc, #1f2937);
-      border-radius: 0.75rem;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
-      border: 1px solid rgba(128, 128, 128, 0.2);
-      padding: 0.875rem;
-      z-index: 10000;
-      animation: urModalFadeIn 0.12s ease-out;
+      border: 1px solid rgba(128, 128, 128, 0.18);
+      border-radius: var(--rounded-box, 0.875rem);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+      transition: border-color 0.2s;
     }
-    .dark .egress-popover-card, [data-theme='dark'] .egress-popover-card {
-      background: #1f242d;
-      color: #cbd5e1;
-      border-color: #334155;
+    .dark .toolkit-card, [data-theme='dark'] .toolkit-card {
+      background: #191e24;
+      border-color: rgba(255, 255, 255, 0.08);
     }
-    #rule-simulator-bar-container {
-      margin: 8px 12px 12px 12px;
-      padding: 10px 14px;
-      background: var(--fallback-b2, rgba(128, 128, 128, 0.08));
-      border: 1px dashed rgba(128, 128, 128, 0.25);
-      border-radius: 0.75rem;
-      transition: all 0.2s ease;
-    }
-    .dark #rule-simulator-bar-container, [data-theme='dark'] #rule-simulator-bar-container {
-      background: rgba(30, 41, 59, 0.6);
-      border-color: rgba(100, 116, 139, 0.35);
+
+    /* 测速并发源微型卡片 */
+    .probe-source-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      background: rgba(128, 128, 128, 0.08);
+      border: 1px solid rgba(128, 128, 128, 0.15);
     }
     .rule-sim-highlight {
-      background-color: rgba(234, 179, 8, 0.25) !important;
-      outline: 2px solid #eab308 !important;
-      transition: background-color 0.5s ease;
+      outline: 2px solid #10b981 !important;
+      background-color: rgba(16, 185, 129, 0.12) !important;
+      transition: all 0.3s ease;
     }
   `;
   if (!document.getElementById('user-rules-custom-styles')) {
     document.head.appendChild(style);
   }
 
-  // Global State
+  // ==========================================
+  // Global State Management
+  // ==========================================
   let userRulesState = {
     rules: [],
     targets: ['DIRECT', 'REJECT', 'GLOBAL'],
@@ -148,16 +174,17 @@
   };
 
   let subManagerState = {
-    showModal: false,
     subscriptions: [],
     loading: false,
+    showAddForm: false,
     activeTab: 'url', // 'url' | 'raw'
+    submitting: false,
   };
 
   let egressBadgeState = {
     loading: false,
     data: null,
-    showPopover: false,
+    showDetails: false,
     error: null,
     lastChecked: 0,
   };
@@ -169,6 +196,7 @@
     error: null,
   };
 
+  // Toast System
   function showToast(message, type = 'info') {
     let toast = document.getElementById('user-rules-toast');
     if (!toast) {
@@ -190,7 +218,7 @@
     const isSuccess = type === 'success';
     const isError = type === 'error';
     item.className = `alert alert-sm ${isSuccess ? 'alert-success' : isError ? 'alert-error' : 'alert-info'} shadow-lg text-xs py-2 px-3 flex items-center gap-2 pointer-events-auto rounded-lg`;
-    item.style.animation = 'urModalFadeIn 0.2s ease-out';
+    item.style.animation = 'urFadeIn 0.2s ease-out';
     item.innerHTML = `<span>${escapeHtml(message)}</span>`;
     toast.appendChild(item);
     setTimeout(() => {
@@ -226,7 +254,7 @@
 
   function getActiveBackendLabel() {
     const active = getActiveBackend();
-    return active?.label || 'node';
+    return active?.label || '默认节点';
   }
 
   function getAuthHeaders(includeJson = false) {
@@ -237,20 +265,27 @@
     return headers;
   }
 
+  function isToolkitRoute() {
+    const h = location.hash || '';
+    return h.startsWith('#/toolkit') || h.startsWith('#/subscriptions');
+  }
+
   // ==========================================
-  // 1. 出口 IP 诊断 Badge (EgressBadge)
+  // 1. 出口 IP 竞速诊断数据层
   // ==========================================
   async function fetchEgressIp(force = false) {
     if (egressBadgeState.loading) return;
     const now = Date.now();
     if (!force && egressBadgeState.data && (now - egressBadgeState.lastChecked < 60000)) {
-      renderEgressBadge();
+      renderFloatingEgressPill();
+      if (isToolkitRoute()) renderToolkitPage();
       return;
     }
 
     egressBadgeState.loading = true;
     egressBadgeState.error = null;
-    renderEgressBadge();
+    renderFloatingEgressPill();
+    if (isToolkitRoute()) renderToolkitPage();
 
     try {
       const apiEndpoint = getPanelApiBase('diagnostics') + '/egress-ip';
@@ -267,203 +302,90 @@
       egressBadgeState.error = e.message || '网络连接异常';
     } finally {
       egressBadgeState.loading = false;
-      renderEgressBadge();
+      renderFloatingEgressPill();
+      if (isToolkitRoute()) renderToolkitPage();
     }
   }
 
-  function renderEgressBadge() {
-    const container = document.getElementById('egress-ip-badge-container');
-    if (!container) return;
+  // ==========================================
+  // 2. 全局悬浮出口 IP 胶囊 (Floating Pill)
+  // ==========================================
+  function renderFloatingEgressPill() {
+    let pill = document.getElementById('zashboard-floating-egress-pill');
+    if (!pill) return;
 
     if (egressBadgeState.loading) {
-      container.innerHTML = `
-        <span class="badge badge-sm badge-ghost gap-1 font-mono text-[11px] opacity-75 animate-pulse">
-          <span class="loading loading-spinner loading-xs"></span>
-          <span>探测出口中...</span>
-        </span>
+      pill.innerHTML = `
+        <span class="loading loading-spinner loading-xs text-primary"></span>
+        <span class="opacity-80">探测出口...</span>
       `;
       return;
     }
 
     if (egressBadgeState.error) {
-      container.innerHTML = `
-        <span class="badge badge-sm badge-error badge-outline gap-1 font-mono text-[11px]" title="${escapeHtml(egressBadgeState.error)}">
-          <span>⚠️ 出口异常</span>
-        </span>
+      pill.innerHTML = `
+        <span class="text-error font-bold">⚠️</span>
+        <span class="text-error text-xs">出口异常</span>
+        <span class="badge badge-xs badge-ghost ml-1">重试</span>
       `;
-      renderEgressPopover();
       return;
     }
 
     const fastest = egressBadgeState.data?.fastest;
     if (!fastest || !fastest.data) {
-      container.innerHTML = `
-        <span class="badge badge-sm badge-ghost gap-1 font-mono text-[11px] opacity-70">
-          <span>🌐 探测出口 IP</span>
-        </span>
+      pill.innerHTML = `
+        <span>🌐</span>
+        <span class="opacity-80">测速出口 IP</span>
       `;
-      renderEgressPopover();
       return;
     }
 
     const ipData = fastest.data;
     const ip = ipData.ip || 'Unknown';
-    const country = ipData.country || '';
-    const flag = getFlagEmoji(country);
-    const latency = fastest.latency_ms ? `${Math.round(fastest.latency_ms)}ms` : '';
+    const flag = getFlagEmoji(ipData.country_code);
+    const latency = Math.round(fastest.latency_ms || 0);
 
-    container.innerHTML = `
-      <div class="badge badge-sm badge-primary badge-outline gap-1.5 font-mono text-[11px] py-2 px-2.5 shadow-sm hover:bg-primary/10 transition-colors">
-        <span>${flag}</span>
-        <span class="font-semibold">${escapeHtml(ip)}</span>
-        ${latency ? `<span class="badge badge-xs badge-ghost text-[10px] opacity-80 px-1 font-sans">${escapeHtml(latency)}</span>` : ''}
-        <svg class="w-3 h-3 opacity-60 ml-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
-      </div>
+    let latencyBadge = 'badge-success';
+    if (latency > 300) latencyBadge = 'badge-error';
+    else if (latency > 150) latencyBadge = 'badge-warning';
+
+    pill.innerHTML = `
+      <span class="text-base">${flag}</span>
+      <span class="font-bold text-xs">${escapeHtml(ip)}</span>
+      <span class="badge badge-xs ${latencyBadge} font-mono">${latency}ms</span>
+      <span class="text-[10px] opacity-40 hover:opacity-100 ml-0.5" title="点击前往网络工具箱">➔</span>
     `;
-
-    renderEgressPopover();
   }
 
-  function renderEgressPopover() {
-    let popover = document.getElementById('egress-popover-card');
-    if (!egressBadgeState.showPopover) {
-      if (popover) popover.remove();
-      return;
-    }
-
-    const badgeContainer = document.getElementById('egress-ip-badge-container');
-    if (!badgeContainer) return;
-
-    if (!popover) {
-      popover = document.createElement('div');
-      popover.id = 'egress-popover-card';
-      popover.className = 'egress-popover-card';
-      badgeContainer.style.position = 'relative';
-      badgeContainer.appendChild(popover);
-    }
-
-    const fastest = egressBadgeState.data?.fastest;
-    const allResults = egressBadgeState.data?.all_results || [];
-
-    let detailsHtml = '';
-    if (egressBadgeState.error) {
-      detailsHtml = `<div class="text-xs text-error py-2 font-mono">${escapeHtml(egressBadgeState.error)}</div>`;
-    } else if (fastest && fastest.data) {
-      const d = fastest.data;
-      const flag = getFlagEmoji(d.country);
-      detailsHtml = `
-        <div class="space-y-2 text-xs">
-          <div class="flex items-center justify-between pb-1.5 border-b border-base-content/10">
-            <span class="opacity-60">出口 IP</span>
-            <span class="font-mono font-bold text-primary">${escapeHtml(d.ip || '-')}</span>
-          </div>
-          <div class="flex items-center justify-between">
-            <span class="opacity-60">国家 / 地区</span>
-            <span class="font-medium">${flag} ${escapeHtml(d.country || '-')} ${escapeHtml(d.city ? `(${d.city})` : '')}</span>
-          </div>
-          <div class="flex items-center justify-between">
-            <span class="opacity-60">运营商 / ASN</span>
-            <span class="font-mono truncate max-w-[160px] text-right" title="${escapeHtml(d.org || d.asn || '-')}">${escapeHtml(d.org || d.asn || '-')}</span>
-          </div>
-          <div class="flex items-center justify-between">
-            <span class="opacity-60">探测优胜源</span>
-            <span class="badge badge-xs badge-neutral font-mono">${escapeHtml(fastest.source || '-')} (${Math.round(fastest.latency_ms)}ms)</span>
-          </div>
-          ${allResults.length > 1 ? `
-            <div class="pt-1 mt-1 border-t border-base-content/10">
-              <div class="text-[10px] opacity-60 mb-1">多源竞速结果:</div>
-              <div class="space-y-1">
-                ${allResults.map(r => `
-                  <div class="flex items-center justify-between text-[11px] font-mono">
-                    <span class="opacity-70">${escapeHtml(r.source)}</span>
-                    <span class="text-success font-semibold">${Math.round(r.latency_ms)}ms</span>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          ` : ''}
-        </div>
-      `;
-    } else {
-      detailsHtml = `<div class="text-xs opacity-60 py-2">未获取到探测数据</div>`;
-    }
-
-    popover.innerHTML = `
-      <div class="flex items-center justify-between mb-2 pb-1 border-b border-base-content/10">
-        <span class="font-bold text-xs flex items-center gap-1">
-          <span>🚀 出口 IP 诊断</span>
-        </span>
-        <button class="btn btn-ghost btn-xs btn-circle" id="btn-close-egress-popover">✕</button>
-      </div>
-      ${detailsHtml}
-      <div class="mt-3 pt-2 border-t border-base-content/10 flex justify-end">
-        <button class="btn btn-xs btn-primary gap-1" id="btn-refresh-egress">
-          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-          重新探测
-        </button>
-      </div>
-    `;
-
-    const closeBtn = popover.querySelector('#btn-close-egress-popover');
-    if (closeBtn) {
-      closeBtn.onclick = (e) => {
+  function injectFloatingEgressPill() {
+    let pill = document.getElementById('zashboard-floating-egress-pill');
+    if (!pill) {
+      pill = document.createElement('div');
+      pill.id = 'zashboard-floating-egress-pill';
+      pill.title = '落地出口 IP 诊断 (点击前往网络工具箱)';
+      pill.onclick = (e) => {
+        e.preventDefault();
         e.stopPropagation();
-        egressBadgeState.showPopover = false;
-        renderEgressPopover();
-      };
-    }
-
-    const refreshBtn = popover.querySelector('#btn-refresh-egress');
-    if (refreshBtn) {
-      refreshBtn.onclick = (e) => {
-        e.stopPropagation();
-        fetchEgressIp(true);
-      };
-    }
-  }
-
-  function injectEgressBadge() {
-    let container = document.getElementById('egress-ip-badge-container');
-    if (container && document.body.contains(container)) return;
-
-    // Search for header or navbar in zashboard UI
-    const header = document.querySelector('header, .navbar, nav, .header, #app > div > header');
-    if (!header) return;
-
-    if (!container) {
-      container = document.createElement('div');
-      container.id = 'egress-ip-badge-container';
-      container.onclick = (e) => {
-        e.stopPropagation();
-        egressBadgeState.showPopover = !egressBadgeState.showPopover;
-        if (egressBadgeState.showPopover && !egressBadgeState.data && !egressBadgeState.loading) {
-          fetchEgressIp(true);
+        if (location.hash !== '#/toolkit') {
+          location.hash = '#/toolkit';
         } else {
-          renderEgressPopover();
+          fetchEgressIp(true);
         }
       };
+      document.body.appendChild(pill);
     }
-
-    // Insert before right-side controls or append to header
-    const rightSide = header.querySelector('.navbar-end, .flex-none, [class*="end"], [class*="right"]');
-    if (rightSide) {
-      rightSide.insertAdjacentElement('afterbegin', container);
-    } else {
-      header.appendChild(container);
-    }
-
-    renderEgressBadge();
+    renderFloatingEgressPill();
     if (!egressBadgeState.data && !egressBadgeState.loading) {
       fetchEgressIp(false);
     }
   }
 
   // ==========================================
-  // 2. 订阅管理中心 (SubManagerModal)
+  // 3. 订阅与节点聚合数据层
   // ==========================================
   async function fetchSubscriptions() {
     subManagerState.loading = true;
-    renderSubModal();
+    if (isToolkitRoute()) renderToolkitPage();
     try {
       const apiEndpoint = getPanelApiBase('subscriptions');
       const res = await fetch(apiEndpoint, { headers: getAuthHeaders() });
@@ -471,64 +393,68 @@
       const json = await res.json();
       if (json.status === 'ok' && json.data) {
         subManagerState.subscriptions = json.data.subscriptions || [];
+      } else {
+        showToast('获取订阅列表失败: ' + (json.error || '未知错误'), 'error');
       }
     } catch (e) {
-      showToast('获取订阅失败: ' + e.message, 'error');
+      showToast('获取订阅列表异常: ' + e.message, 'error');
     } finally {
       subManagerState.loading = false;
-      renderSubModal();
+      if (isToolkitRoute()) renderToolkitPage();
     }
   }
 
-  async function addSubscriptionUrl(name, url, excludeFilter) {
+  async function submitAddSubscription(name, url, excludeRegex) {
+    subManagerState.submitting = true;
+    if (isToolkitRoute()) renderToolkitPage();
     try {
       const apiEndpoint = getPanelApiBase('subscriptions');
+      const payload = { name, url, exclude_filter: excludeRegex };
       const res = await fetch(apiEndpoint, {
         method: 'POST',
         headers: getAuthHeaders(true),
-        body: JSON.stringify({
-          name: name.trim(),
-          url: url.trim(),
-          type: 'remote',
-          exclude_filter: excludeFilter ? excludeFilter.trim() : '',
-          enabled: true,
-        }),
+        body: JSON.stringify(payload),
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.status !== 'ok') {
-        throw new Error(json.error || '添加订阅失败');
+      const json = await res.json();
+      if (res.ok && json.status === 'ok') {
+        showToast(`✅ 订阅「${name}」导入成功，新增 ${json.data?.node_count || 0} 个节点并自动聚合生效！`, 'success');
+        subManagerState.showAddForm = false;
+        await fetchSubscriptions();
+      } else {
+        showToast('导入订阅失败: ' + (json.error || json.message || '格式错误或连接超时'), 'error');
       }
-      showToast('🎉 订阅添加并解析成功！', 'success');
-      await fetchSubscriptions();
-      return true;
     } catch (e) {
-      showToast('添加失败: ' + e.message, 'error');
-      return false;
+      showToast('提交异常: ' + e.message, 'error');
+    } finally {
+      subManagerState.submitting = false;
+      if (isToolkitRoute()) renderToolkitPage();
     }
   }
 
-  async function importRawNodes(name, content, excludeFilter) {
+  async function submitImportNodes(name, rawContent) {
+    subManagerState.submitting = true;
+    if (isToolkitRoute()) renderToolkitPage();
     try {
       const apiEndpoint = getPanelApiBase('subscriptions') + '/import-nodes';
+      const payload = { name, content: rawContent };
       const res = await fetch(apiEndpoint, {
         method: 'POST',
         headers: getAuthHeaders(true),
-        body: JSON.stringify({
-          name: name.trim(),
-          raw_content: content.trim(),
-          exclude_filter: excludeFilter ? excludeFilter.trim() : '',
-        }),
+        body: JSON.stringify(payload),
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.status !== 'ok') {
-        throw new Error(json.error || '导入节点失败');
+      const json = await res.json();
+      if (res.ok && json.status === 'ok') {
+        showToast(`✅ 节点批量导入成功，聚合 ${json.data?.node_count || 0} 个有效节点！`, 'success');
+        subManagerState.showAddForm = false;
+        await fetchSubscriptions();
+      } else {
+        showToast('节点解析失败: ' + (json.error || json.message || '未匹配到合法链接'), 'error');
       }
-      showToast('🎉 分享链接导入成功！', 'success');
-      await fetchSubscriptions();
-      return true;
     } catch (e) {
-      showToast('导入失败: ' + e.message, 'error');
-      return false;
+      showToast('提交异常: ' + e.message, 'error');
+    } finally {
+      subManagerState.submitting = false;
+      if (isToolkitRoute()) renderToolkitPage();
     }
   }
 
@@ -538,474 +464,722 @@
       const res = await fetch(apiEndpoint, {
         method: 'POST',
         headers: getAuthHeaders(true),
-        body: JSON.stringify({ enabled: !enabled }),
+        body: JSON.stringify({ enabled }),
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.status !== 'ok') {
-        throw new Error(json.error || '状态切换失败');
+      const json = await res.json();
+      if (res.ok && json.status === 'ok') {
+        showToast(`订阅已${enabled ? '启用' : '禁用'}，配置已同步热重载`, 'info');
+        await fetchSubscriptions();
+      } else {
+        showToast('切换状态失败: ' + (json.error || '未知错误'), 'error');
       }
-      showToast('订阅状态已更新', 'success');
-      await fetchSubscriptions();
     } catch (e) {
-      showToast('操作失败: ' + e.message, 'error');
+      showToast('请求异常: ' + e.message, 'error');
     }
   }
 
-  async function updateSubscription(subId, btn) {
-    if (btn) {
-      btn.disabled = true;
-      btn.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 更新中';
-    }
+  async function updateSubscription(subId) {
     try {
       const apiEndpoint = getPanelApiBase('subscriptions') + '/' + encodeURIComponent(subId) + '/update';
       const res = await fetch(apiEndpoint, {
         method: 'POST',
-        headers: getAuthHeaders(true),
-        body: JSON.stringify({ refresh: true }),
+        headers: getAuthHeaders(),
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.status !== 'ok') {
-        throw new Error(json.error || '更新失败');
+      const json = await res.json();
+      if (res.ok && json.status === 'ok') {
+        showToast(`✅ 订阅更新成功，包含 ${json.data?.node_count || 0} 个有效节点`, 'success');
+        await fetchSubscriptions();
+      } else {
+        showToast('更新失败: ' + (json.error || '拉取超时或格式错误'), 'error');
       }
-      showToast('🔄 订阅节点已刷新！', 'success');
-      await fetchSubscriptions();
     } catch (e) {
-      showToast('更新失败: ' + e.message, 'error');
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = '🔄 更新';
-      }
+      showToast('更新异常: ' + e.message, 'error');
     }
   }
 
-  async function deleteSubscription(subId) {
-    if (!confirm('确定要删除此订阅源吗？关联节点将会被移除。')) return;
+  async function deleteSubscription(subId, subName) {
+    if (!confirm(`确认删除订阅「${subName}」吗？相关聚合节点将从配置中剥离。`)) return;
     try {
       const apiEndpoint = getPanelApiBase('subscriptions') + '/' + encodeURIComponent(subId);
       const res = await fetch(apiEndpoint, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.status !== 'ok') {
-        throw new Error(json.error || '删除失败');
+      const json = await res.json();
+      if (res.ok && json.status === 'ok') {
+        showToast(`订阅「${subName}」已删除`, 'info');
+        await fetchSubscriptions();
+      } else {
+        showToast('删除失败: ' + (json.error || '未知错误'), 'error');
       }
-      showToast('🗑️ 订阅已删除', 'success');
-      await fetchSubscriptions();
     } catch (e) {
-      showToast('删除失败: ' + e.message, 'error');
+      showToast('删除异常: ' + e.message, 'error');
     }
   }
 
-  function renderSubModal() {
-    let modalEl = document.getElementById('sub-manager-modal');
-    if (!subManagerState.showModal) {
-      if (modalEl) modalEl.remove();
+  // ==========================================
+  // 4. 规则分流与 DNS 污染推演模拟器
+  // ==========================================
+  async function runRuleSimulation(inputDomain) {
+    const query = (inputDomain || ruleSimulatorState.input || '').trim();
+    if (!query) {
+      showToast('请输入待测试的域名或 IP', 'info');
       return;
     }
 
-    if (!modalEl) {
-      modalEl = document.createElement('div');
-      modalEl.id = 'sub-manager-modal';
-      modalEl.className = 'user-rules-modal-backdrop';
-      document.body.appendChild(modalEl);
-    }
-
-    const currentLabel = getActiveBackendLabel();
-    const subs = subManagerState.subscriptions || [];
-
-    const rows = subs.length ? subs.map((s) => {
-      const isEnabled = s.enabled !== false;
-      const count = s.node_count || (Array.isArray(s.proxies) ? s.proxies.length : 0);
-      const updated = s.updated_at ? s.updated_at.split('T')[0] : '从未';
-      return `
-        <tr class="hover:bg-base-200/50 transition-colors">
-          <td class="font-medium text-xs">
-            <div class="flex flex-col">
-              <span class="font-semibold">${escapeHtml(s.name)}</span>
-              <span class="text-[10px] font-mono opacity-50 truncate max-w-[140px]" title="${escapeHtml(s.url || s.type)}">${escapeHtml(s.url || s.type)}</span>
-            </div>
-          </td>
-          <td><span class="badge badge-sm badge-neutral font-mono text-[11px]">${count} 节点</span></td>
-          <td class="text-[11px] opacity-60 font-mono">${escapeHtml(updated)}</td>
-          <td>
-            <input type="checkbox" class="toggle toggle-sm toggle-success sub-toggle-btn" data-sub-id="${escapeHtml(s.id)}" ${isEnabled ? 'checked' : ''} />
-          </td>
-          <td class="text-right flex items-center justify-end gap-1.5">
-            ${s.type === 'remote' || s.url ? `
-              <button class="btn btn-xs btn-ghost sub-update-btn font-normal" data-sub-id="${escapeHtml(s.id)}">🔄 更新</button>
-            ` : ''}
-            <button class="btn btn-xs btn-error btn-outline sub-delete-btn" data-sub-id="${escapeHtml(s.id)}">删除</button>
-          </td>
-        </tr>
-      `;
-    }).join('') : `<tr><td colspan="5" class="text-center py-6 opacity-50 text-xs">暂无订阅源，请在上方添加</td></tr>`;
-
-    modalEl.innerHTML = `
-      <div class="user-rules-modal-content">
-        <div class="user-rules-modal-header">
-          <div class="flex items-center gap-2">
-            <span class="text-lg">🔗</span>
-            <h3 class="font-bold text-sm">节点与订阅管理 <span class="badge badge-sm badge-outline text-[10px] ml-1 font-mono">${escapeHtml(currentLabel)}</span></h3>
-            <span class="badge badge-sm badge-neutral text-[11px]">${subs.length}</span>
-          </div>
-          <button class="btn btn-ghost btn-sm btn-circle" id="btn-close-sub-modal">✕</button>
-        </div>
-        <div class="user-rules-modal-body flex flex-col gap-4">
-          <!-- Add Form Tabs -->
-          <div class="bg-base-200/50 p-3 rounded-xl border border-base-content/10">
-            <div class="tabs tabs-boxed bg-base-300/40 p-1 mb-3">
-              <a class="tab tab-sm ${subManagerState.activeTab === 'url' ? 'tab-active font-bold' : ''}" id="tab-sub-url">🔗 添加订阅 URL</a>
-              <a class="tab tab-sm ${subManagerState.activeTab === 'raw' ? 'tab-active font-bold' : ''}" id="tab-sub-raw">📋 导入节点/分享链接</a>
-            </div>
-
-            ${subManagerState.activeTab === 'url' ? `
-              <div class="flex flex-col gap-2 text-xs">
-                <div class="flex gap-2">
-                  <input id="sub-add-name" class="input input-bordered input-sm w-1/3" placeholder="订阅名称 (如: 专线)" />
-                  <input id="sub-add-url" class="input input-bordered input-sm flex-1 font-mono" placeholder="https://..." />
-                </div>
-                <div class="flex gap-2 items-center">
-                  <input id="sub-add-filter" class="input input-bordered input-sm flex-1" placeholder="过滤正则 (可选, 排除匹配节点)" />
-                  <button class="btn btn-sm btn-primary shrink-0" id="btn-submit-sub-url">保存并拉取</button>
-                </div>
-              </div>
-            ` : `
-              <div class="flex flex-col gap-2 text-xs">
-                <div class="flex gap-2">
-                  <input id="sub-raw-name" class="input input-bordered input-sm flex-1" placeholder="节点包名称 (如: 自建节点)" />
-                  <input id="sub-raw-filter" class="input input-bordered input-sm w-1/2" placeholder="过滤正则 (可选)" />
-                </div>
-                <textarea id="sub-raw-content" class="textarea textarea-bordered text-xs font-mono w-full h-20" placeholder="支持 Clash YAML proxies 格式、多行 vmess://, vless://, ss://, trojan://, hysteria2:// 分享链接或 Base64 文本"></textarea>
-                <div class="flex justify-end">
-                  <button class="btn btn-sm btn-primary" id="btn-submit-sub-raw">导入节点</button>
-                </div>
-              </div>
-            `}
-          </div>
-
-          <!-- Subscription List -->
-          <div class="overflow-x-auto">
-            <table class="table table-sm w-full">
-              <thead>
-                <tr class="opacity-70 text-[11px]">
-                  <th>订阅源</th>
-                  <th>节点数</th>
-                  <th>更新时间</th>
-                  <th>状态</th>
-                  <th class="text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rows}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    `;
-
-    modalEl.querySelector('#btn-close-sub-modal').onclick = () => {
-      subManagerState.showModal = false;
-      renderSubModal();
-    };
-
-    const tabUrl = modalEl.querySelector('#tab-sub-url');
-    if (tabUrl) {
-      tabUrl.onclick = () => {
-        subManagerState.activeTab = 'url';
-        renderSubModal();
-      };
-    }
-
-    const tabRaw = modalEl.querySelector('#tab-sub-raw');
-    if (tabRaw) {
-      tabRaw.onclick = () => {
-        subManagerState.activeTab = 'raw';
-        renderSubModal();
-      };
-    }
-
-    const btnSubmitUrl = modalEl.querySelector('#btn-submit-sub-url');
-    if (btnSubmitUrl) {
-      btnSubmitUrl.onclick = async () => {
-        const name = modalEl.querySelector('#sub-add-name')?.value || '';
-        const url = modalEl.querySelector('#sub-add-url')?.value || '';
-        const filter = modalEl.querySelector('#sub-add-filter')?.value || '';
-        if (!name.trim()) { alert('请输入订阅名称'); return; }
-        if (!url.trim()) { alert('请输入订阅 URL'); return; }
-        btnSubmitUrl.disabled = true;
-        btnSubmitUrl.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 拉取中...';
-        await addSubscriptionUrl(name, url, filter);
-      };
-    }
-
-    const btnSubmitRaw = modalEl.querySelector('#btn-submit-sub-raw');
-    if (btnSubmitRaw) {
-      btnSubmitRaw.onclick = async () => {
-        const name = modalEl.querySelector('#sub-raw-name')?.value || '';
-        const content = modalEl.querySelector('#sub-raw-content')?.value || '';
-        const filter = modalEl.querySelector('#sub-raw-filter')?.value || '';
-        if (!name.trim()) { alert('请输入节点包名称'); return; }
-        if (!content.trim()) { alert('请输入分享链接或文本'); return; }
-        btnSubmitRaw.disabled = true;
-        btnSubmitRaw.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 导入中...';
-        await importRawNodes(name, content, filter);
-      };
-    }
-
-    modalEl.querySelectorAll('.sub-toggle-btn').forEach((toggle) => {
-      toggle.onchange = (e) => {
-        const id = toggle.getAttribute('data-sub-id');
-        const wasEnabled = !e.target.checked;
-        toggleSubscription(id, wasEnabled);
-      };
-    });
-
-    modalEl.querySelectorAll('.sub-update-btn').forEach((btn) => {
-      btn.onclick = () => {
-        const id = btn.getAttribute('data-sub-id');
-        if (id) updateSubscription(id, btn);
-      };
-    });
-
-    modalEl.querySelectorAll('.sub-delete-btn').forEach((btn) => {
-      btn.onclick = () => {
-        const id = btn.getAttribute('data-sub-id');
-        if (id) deleteSubscription(id);
-      };
-    });
-  }
-
-  function createSubButton() {
-    const btn = document.createElement('button');
-    btn.id = 'sub-manager-top-action-btn';
-    btn.className = 'btn btn-circle btn-sm';
-    btn.type = 'button';
-    btn.title = '订阅与节点管理';
-    btn.innerHTML = `
-      <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-      </svg>
-    `;
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      subManagerState.showModal = true;
-      fetchSubscriptions();
-      renderSubModal();
-    };
-    return btn;
-  }
-
-  // ==========================================
-  // 3. 规则推演模拟器 (RuleSimulatorBar)
-  // ==========================================
-  async function simulateRule(domain) {
-    if (!domain || !domain.trim()) return;
+    ruleSimulatorState.input = query;
     ruleSimulatorState.loading = true;
     ruleSimulatorState.error = null;
     ruleSimulatorState.result = null;
-    renderRuleSimulator();
+    if (isToolkitRoute()) renderToolkitPage();
 
     try {
-      const apiEndpoint = getPanelApiBase('rules') + '/simulate';
-      const res = await fetch(apiEndpoint, {
-        method: 'POST',
-        headers: getAuthHeaders(true),
-        body: JSON.stringify({ domain: domain.trim() }),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.status !== 'ok') {
-        throw new Error(json.error || '推演失败');
+      const apiEndpoint = getPanelApiBase('user-rules') + '/simulate?query=' + encodeURIComponent(query);
+      const res = await fetch(apiEndpoint, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      if (json.status === 'ok' && json.data) {
+        ruleSimulatorState.result = json.data;
+      } else {
+        ruleSimulatorState.error = json.error || '推演无匹配';
       }
-      ruleSimulatorState.result = json.data;
-      highlightMatchedRuleInPage(json.data);
     } catch (e) {
-      ruleSimulatorState.error = e.message || '推演异常';
+      ruleSimulatorState.error = e.message || '网络连接异常';
     } finally {
       ruleSimulatorState.loading = false;
-      renderRuleSimulator();
+      if (isToolkitRoute()) renderToolkitPage();
     }
   }
 
-  function highlightMatchedRuleInPage(simData) {
-    if (!simData || !simData.matched_rule) return;
-    const mr = simData.matched_rule;
-    const payload = mr.payload || '';
-    const raw = mr.raw || '';
+  // ==========================================
+  // 5. 独立页面渲染: ToolkitView (#/toolkit)
+  // ==========================================
+  function renderToolkitPage() {
+    const viewContainer = document.getElementById('zashboard-toolkit-view');
+    if (!viewContainer) return;
 
-    // Search existing rule cards or table rows in the DOM
-    document.querySelectorAll('.rule-sim-highlight').forEach(el => el.classList.remove('rule-sim-highlight'));
+    // --- Section 1: 出口 IP 看板 HTML ---
+    const fastest = egressBadgeState.data?.fastest;
+    const ipData = fastest?.data || {};
+    const ip = ipData.ip || '未探测';
+    const country = ipData.country || ipData.country_code || '未知地区';
+    const city = ipData.city || '';
+    const flag = getFlagEmoji(ipData.country_code);
+    const org = ipData.org || ipData.isp || '未知组织';
+    const asn = ipData.asn ? `AS${ipData.asn}` : '';
+    const latency = fastest?.latency_ms ? `${Math.round(fastest.latency_ms)} ms` : '--';
+    const source = fastest?.source || '--';
+    const allResults = egressBadgeState.data?.all_results || [];
 
-    if (!payload && !raw) return;
-
-    const elements = Array.from(document.querySelectorAll('tr, .card, [class*="rule-item"], [class*="rule_item"]'));
-    const matchedEl = elements.find(el => {
-      const text = el.textContent || '';
-      return (payload && text.includes(payload)) || (raw && text.includes(raw));
-    });
-
-    if (matchedEl) {
-      matchedEl.classList.add('rule-sim-highlight');
-      matchedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      showToast(`🎯 已在规则列表中定位命中规则: ${mr.type} ${payload} -> ${mr.target}`, 'info');
+    let egressHeaderBadge = `<span class="badge badge-success badge-sm font-mono">${latency} (${escapeHtml(source)})</span>`;
+    if (egressBadgeState.loading) {
+      egressHeaderBadge = `<span class="badge badge-ghost badge-sm gap-1 animate-pulse"><span class="loading loading-spinner loading-xs"></span> 测速中...</span>`;
+    } else if (egressBadgeState.error) {
+      egressHeaderBadge = `<span class="badge badge-error badge-sm">⚠️ ${escapeHtml(egressBadgeState.error)}</span>`;
     }
-  }
 
-  function renderRuleSimulator() {
-    const container = document.getElementById('rule-simulator-bar-container');
-    if (!container) return;
+    // --- Section 2: 订阅管理中心 HTML ---
+    const subs = subManagerState.subscriptions || [];
+    const totalNodes = subs.reduce((acc, cur) => acc + (cur.node_count || 0), 0);
+    const activeSubs = subs.filter((s) => s.enabled).length;
 
-    const res = ruleSimulatorState.result;
-    const err = ruleSimulatorState.error;
-    const loading = ruleSimulatorState.loading;
-
-    let resultHtml = '';
-    if (loading) {
-      resultHtml = `
-        <div class="mt-2.5 flex items-center gap-2 text-xs opacity-75 font-mono">
-          <span class="loading loading-spinner loading-xs"></span>
-          <span>正在推演 Mihomo 路由规则与 DNS 策略...</span>
+    let subListHtml = '';
+    if (subManagerState.loading && subs.length === 0) {
+      subListHtml = `
+        <div class="py-12 flex flex-col items-center justify-center text-base-content/60 text-xs">
+          <span class="loading loading-spinner loading-md text-primary mb-2"></span>
+          <span>正在拉取订阅列表与聚合状态...</span>
         </div>
       `;
-    } else if (err) {
-      resultHtml = `
-        <div class="mt-2.5 alert alert-error alert-sm text-xs py-1.5 px-2.5 rounded-lg flex items-center justify-between">
-          <span>❌ 推演失败: ${escapeHtml(err)}</span>
-          <button class="btn btn-ghost btn-xs" id="btn-clear-sim-res">清除</button>
+    } else if (subs.length === 0) {
+      subListHtml = `
+        <div class="py-10 px-4 text-center border-2 border-dashed border-base-content/10 rounded-xl my-2">
+          <div class="text-3xl mb-2">🛫</div>
+          <div class="font-bold text-sm mb-1">暂无订阅源</div>
+          <div class="text-xs text-base-content/60 max-w-sm mx-auto mb-4">
+            支持一键添加 Clash / Mihomo 订阅 URL，或直接粘贴 ss/vmess/vless/trojan/hy2 分享链接批量导入。
+          </div>
+          <button class="btn btn-primary btn-sm font-normal" id="btn-empty-add-sub">
+            + 导入第一个订阅
+          </button>
         </div>
       `;
-    } else if (res && res.matched_rule) {
-      const mr = res.matched_rule;
-      const dns = res.dns || {};
+    } else {
+      subListHtml = `
+        <div class="space-y-3 mt-3">
+          ${subs.map((s) => {
+            const isRaw = s.type === 'raw_nodes';
+            const nodeCount = s.node_count || 0;
+            const updateTime = s.updated_at ? new Date(s.updated_at).toLocaleString() : '从不';
+            return `
+              <div class="p-3.5 rounded-xl bg-base-200/60 hover:bg-base-200 border border-base-content/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors">
+                <div class="flex items-start gap-3">
+                  <div class="w-8 h-8 rounded-lg bg-primary/10 text-primary flex items-center justify-center text-base shrink-0 mt-0.5">
+                    ${isRaw ? '📋' : '🔗'}
+                  </div>
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="font-bold text-sm">${escapeHtml(s.name)}</span>
+                      <span class="badge badge-xs ${s.enabled ? 'badge-success' : 'badge-ghost'}">
+                        ${s.enabled ? '启用' : '已停用'}
+                      </span>
+                      <span class="badge badge-xs badge-outline font-mono text-[10px]">
+                        ${nodeCount} 节点
+                      </span>
+                    </div>
+                    <div class="text-[11px] text-base-content/60 mt-1 font-mono break-all line-clamp-1">
+                      ${isRaw ? '文本格式单节点聚合' : escapeHtml(s.url || '')}
+                    </div>
+                    <div class="text-[10px] text-base-content/40 mt-0.5">
+                      更新于: ${escapeHtml(updateTime)}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-1.5 self-end sm:self-center shrink-0">
+                  <button class="btn btn-ghost btn-xs btn-update-sub" data-id="${escapeHtml(s.id)}" title="立即同步更新">
+                    🔄 更新
+                  </button>
+                  <button class="btn btn-ghost btn-xs btn-toggle-sub" data-id="${escapeHtml(s.id)}" data-enabled="${s.enabled ? '1' : '0'}">
+                    ${s.enabled ? '⏸ 禁用' : '▶ 启用'}
+                  </button>
+                  <button class="btn btn-ghost btn-xs text-error btn-del-sub" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" title="删除订阅">
+                    🗑️
+                  </button>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    // 添加表单 HTML
+    let addFormHtml = '';
+    if (subManagerState.showAddForm) {
+      addFormHtml = `
+        <div class="mt-4 p-4 rounded-xl bg-base-200/80 border border-primary/20 animate-fadeIn">
+          <div class="flex items-center justify-between pb-2 mb-3 border-b border-base-content/10">
+            <span class="font-bold text-xs flex items-center gap-1.5">
+              <span>➕ 导入新订阅与节点</span>
+            </span>
+            <button class="btn btn-ghost btn-xs btn-circle" id="btn-cancel-add-sub">✕</button>
+          </div>
+
+          <div class="tabs tabs-boxed tabs-xs mb-3 w-fit">
+            <a class="tab ${subManagerState.activeTab === 'url' ? 'tab-active' : ''}" id="tab-mode-url">Clash 订阅 URL</a>
+            <a class="tab ${subManagerState.activeTab === 'raw' ? 'tab-active' : ''}" id="tab-mode-raw">粘贴单节点分享链接</a>
+          </div>
+
+          ${subManagerState.activeTab === 'url' ? `
+            <div class="space-y-3">
+              <div>
+                <label class="label py-1"><span class="label-text text-xs">订阅别名 (前缀隔离)</span></label>
+                <input id="input-sub-name" class="input input-sm input-bordered w-full text-xs" placeholder="例如: 飞鸟机场" />
+              </div>
+              <div>
+                <label class="label py-1"><span class="label-text text-xs">订阅 URL (HTTP/HTTPS)</span></label>
+                <input id="input-sub-url" class="input input-sm input-bordered w-full text-xs font-mono" placeholder="https://airport.com/api/v1/client/subscribe?token=..." />
+              </div>
+              <div>
+                <label class="label py-1">
+                  <span class="label-text text-xs">过滤正则 (排除公告/非代理节点)</span>
+                  <span class="label-text-alt text-[10px] opacity-60">留空使用内置过滤</span>
+                </label>
+                <input id="input-sub-filter" class="input input-sm input-bordered w-full text-xs font-mono" placeholder="(剩余流量|官网|重置|过期|公告)" />
+              </div>
+              <div class="flex justify-end gap-2 pt-2">
+                <button class="btn btn-sm btn-ghost" id="btn-close-sub-form">取消</button>
+                <button class="btn btn-sm btn-primary" id="btn-submit-sub-url" ${subManagerState.submitting ? 'disabled' : ''}>
+                  ${subManagerState.submitting ? '<span class="loading loading-spinner loading-xs"></span> 导入中...' : '确认导入并聚合'}
+                </button>
+              </div>
+            </div>
+          ` : `
+            <div class="space-y-3">
+              <div>
+                <label class="label py-1"><span class="label-text text-xs">节点命名空间前缀</span></label>
+                <input id="input-raw-name" class="input input-sm input-bordered w-full text-xs" placeholder="例如: 自建节点" />
+              </div>
+              <div>
+                <label class="label py-1">
+                  <span class="label-text text-xs">节点分享链接 (支持多行)</span>
+                  <span class="label-text-alt text-[10px] opacity-60">ss:// | vmess:// | vless:// | trojan:// | hy2://</span>
+                </label>
+                <textarea id="input-raw-content" class="textarea textarea-bordered textarea-sm w-full text-xs font-mono h-24" placeholder="ss://...\nvless://...\nhysteria2://..."></textarea>
+              </div>
+              <div class="flex justify-end gap-2 pt-2">
+                <button class="btn btn-sm btn-ghost" id="btn-close-sub-form-2">取消</button>
+                <button class="btn btn-sm btn-primary" id="btn-submit-sub-raw" ${subManagerState.submitting ? 'disabled' : ''}>
+                  ${subManagerState.submitting ? '<span class="loading loading-spinner loading-xs"></span> 解析导入...' : '批量导入并生效'}
+                </button>
+              </div>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    // --- Section 3: 规则分流与 DNS 推演 HTML ---
+    const simRes = ruleSimulatorState.result;
+    const simErr = ruleSimulatorState.error;
+    const simLoading = ruleSimulatorState.loading;
+
+    let simOutputHtml = '';
+    if (simLoading) {
+      simOutputHtml = `
+        <div class="p-6 text-center text-xs text-base-content/60 font-mono">
+          <span class="loading loading-spinner loading-sm text-primary mb-2"></span>
+          <div>正在逐层模拟 Mihomo 规则链与 nameserver-policy...</div>
+        </div>
+      `;
+    } else if (simErr) {
+      simOutputHtml = `
+        <div class="alert alert-error text-xs py-2.5 px-3 rounded-lg flex items-center justify-between">
+          <span>❌ 推演失败: ${escapeHtml(simErr)}</span>
+          <button class="btn btn-ghost btn-xs" id="btn-clear-sim">清除</button>
+        </div>
+      `;
+    } else if (simRes && simRes.matched_rule) {
+      const mr = simRes.matched_rule;
+      const dns = simRes.dns || {};
       const warnings = dns.warnings || [];
       const nameservers = dns.nameservers || [];
 
-      resultHtml = `
-        <div class="mt-3 pt-2.5 border-t border-base-content/10 flex flex-col gap-2 text-xs animate-fadeIn">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div class="flex items-center gap-1.5">
-              <span class="font-bold text-success">🎯 命中规则:</span>
-              <span class="badge badge-sm badge-outline badge-primary font-mono">${escapeHtml(mr.type || 'DEFAULT')}</span>
-              <span class="font-mono font-medium">${escapeHtml(mr.payload || '*')}</span>
-              <span class="opacity-60">➔</span>
-              <span class="badge badge-sm badge-success font-bold font-mono">${escapeHtml(mr.target || 'DIRECT')}</span>
+      simOutputHtml = `
+        <div class="p-4 rounded-xl bg-base-200/60 border border-base-content/10 space-y-3 animate-fadeIn">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-xs text-success flex items-center gap-1">
+              <span>🎯 规则命中完成</span>
+            </span>
+            <button class="btn btn-ghost btn-xs btn-circle" id="btn-clear-sim" title="清除结果">✕</button>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono">
+            <div class="p-2.5 rounded-lg bg-base-100 border border-base-content/5">
+              <div class="text-[10px] text-base-content/50 uppercase">匹配规则</div>
+              <div class="font-bold mt-0.5 text-primary">${escapeHtml(mr.type)}</div>
+              <div class="text-xs break-all opacity-80">${escapeHtml(mr.payload || '*')}</div>
             </div>
-            <div class="flex items-center gap-2 font-mono text-[11px] opacity-75">
-              <span>DNS 服务器:</span>
-              <span class="badge badge-xs badge-neutral">${escapeHtml(nameservers.join(', ') || '默认')}</span>
-              <button class="btn btn-ghost btn-xs btn-circle ml-1" id="btn-clear-sim-res" title="清除结果">✕</button>
+            <div class="p-2.5 rounded-lg bg-base-100 border border-base-content/5">
+              <div class="text-[10px] text-base-content/50 uppercase">出口策略 / 目标</div>
+              <div class="font-bold mt-0.5 text-success">${escapeHtml(mr.target || 'DIRECT')}</div>
+              <div class="text-[10px] opacity-60">规则行号: #${mr.line_number || '--'}</div>
             </div>
           </div>
 
-          ${warnings.length > 0 ? `
-            <div class="alert alert-warning alert-sm py-1.5 px-2.5 text-[11px] rounded-lg flex flex-col gap-1">
-              ${warnings.map(w => `<div class="flex items-center gap-1"><span>⚠️</span><span>${escapeHtml(w)}</span></div>`).join('')}
+          <div class="p-2.5 rounded-lg bg-base-100 border border-base-content/5 text-xs">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] text-base-content/50 uppercase font-mono">DNS 解析策略</span>
+              <span class="badge badge-xs badge-neutral font-mono">${escapeHtml(nameservers.join(', ') || '全局默认')}</span>
             </div>
-          ` : ''}
+            ${warnings.length > 0 ? `
+              <div class="mt-2 p-2 rounded bg-warning/10 border border-warning/30 text-warning-content text-[11px] space-y-1">
+                ${warnings.map(w => `<div class="flex items-start gap-1"><span>⚠️</span><span>${escapeHtml(w)}</span></div>`).join('')}
+              </div>
+            ` : `
+              <div class="text-[11px] text-success flex items-center gap-1 mt-1">
+                <span>🛡️</span><span>DNS 路由安全，未探测到明文污染风险</span>
+              </div>
+            `}
+          </div>
+        </div>
+      `;
+    } else {
+      simOutputHtml = `
+        <div class="py-8 px-4 text-center border border-dashed border-base-content/10 rounded-xl text-base-content/50 text-xs">
+          输入任意域名或 IP（如 <code>api.openai.com</code> 或 <code>github.com</code>），实时模拟 Mihomo 命中分流规则与 DNS 污染防护。
         </div>
       `;
     }
 
-    container.innerHTML = `
-      <div class="flex items-center justify-between gap-3">
-        <div class="flex items-center gap-2 flex-1">
-          <span class="text-sm font-semibold flex items-center gap-1">
-            <span>🧭</span>
-            <span class="hidden sm:inline">规则推演</span>
-          </span>
-          <div class="relative flex-1 max-w-md">
-            <input
-              id="rule-sim-input"
-              class="input input-bordered input-sm w-full font-mono text-xs pr-16"
-              placeholder="输入待推演域名或 IP (如: api.openai.com)"
-              value="${escapeHtml(ruleSimulatorState.input)}"
-            />
-            <button class="btn btn-primary btn-xs absolute right-1 top-1/2 -translate-y-1/2 font-normal" id="btn-run-rule-sim">
-              推演
+    // --- 全局组装页面 ---
+    viewContainer.innerHTML = `
+      <div class="max-w-6xl mx-auto space-y-6 pb-12">
+        <!-- 页面顶部 Header -->
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-base-content/10 pb-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h1 class="text-xl font-bold tracking-tight">🛠️ 网络工具箱与聚合中心</h1>
+              <span class="badge badge-sm badge-outline font-mono text-[10px]">${escapeHtml(getActiveBackendLabel())}</span>
+            </div>
+            <p class="text-xs text-base-content/60 mt-0.5">
+              聚合多机场订阅、毫秒级多源出口 IP 诊断、Mihomo 分流与 DNS 污染实时推演
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-sm btn-ghost gap-1.5 font-normal" id="btn-refresh-all">
+              <span>🔄</span> 刷新状态
             </button>
+            <a href="#/proxies" class="btn btn-sm btn-outline gap-1 font-normal">
+              <span>🚀</span> 节点代理页
+            </a>
           </div>
         </div>
-        <div class="text-[11px] opacity-50 font-mono hidden md:block">
-          实时校验分流目标与 DNS 污染
+
+        <!-- 顶部全宽卡片: 出口 IP 毫秒级多源竞速看板 -->
+        <div class="toolkit-card p-4 sm:p-5">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div class="flex items-center gap-4">
+              <div class="text-4xl select-none">${flag}</div>
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="font-mono text-xl font-extrabold tracking-tight">${escapeHtml(ip)}</span>
+                  ${egressHeaderBadge}
+                </div>
+                <div class="text-xs text-base-content/70 mt-1 flex flex-wrap items-center gap-2">
+                  <span>${escapeHtml(country)}</span>
+                  ${city ? `<span>· ${escapeHtml(city)}</span>` : ''}
+                  ${org ? `<span class="opacity-80">· ${escapeHtml(org)}</span>` : ''}
+                  ${asn ? `<span class="badge badge-xs badge-ghost font-mono">${escapeHtml(asn)}</span>` : ''}
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 self-end md:self-center">
+              <button class="btn btn-sm btn-primary gap-1" id="btn-retest-egress" ${egressBadgeState.loading ? 'disabled' : ''}>
+                ${egressBadgeState.loading ? '<span class="loading loading-spinner loading-xs"></span>' : '⚡'}
+                <span>重新测速</span>
+              </button>
+              <button class="btn btn-sm btn-ghost" id="btn-toggle-egress-details">
+                ${egressBadgeState.showDetails ? '收起明细 ▲' : '竞速明细 ▼'}
+              </button>
+            </div>
+          </div>
+
+          ${egressBadgeState.showDetails ? `
+            <div class="mt-4 pt-4 border-t border-base-content/10 animate-fadeIn">
+              <div class="text-xs font-bold mb-2 flex items-center justify-between">
+                <span>多源并发竞速探针明细</span>
+                <span class="text-[10px] text-base-content/50 font-normal">向 4 家权威 IP 数据库并发探针，以最快落地结果呈现</span>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                ${allResults.map((r) => {
+                  const ms = Math.round(r.latency_ms || 0);
+                  const ok = r.success;
+                  return `
+                    <div class="probe-source-badge justify-between ${ok ? '' : 'opacity-60 border-error/30'}">
+                      <span class="font-semibold text-[11px]">${escapeHtml(r.source)}</span>
+                      <div class="flex items-center gap-1.5">
+                        <span class="font-mono ${ok ? 'text-success' : 'text-error'}">${ok ? ms + 'ms' : '失败'}</span>
+                        <span class="text-[10px]">${ok ? '✅' : '❌'}</span>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+          ` : ''}
+        </div>
+
+        <!-- 页面双栏主体: 订阅中心 (左) + 规则/DNS推演 (右) -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <!-- 左侧: 订阅与节点聚合中心 (7 Cols) -->
+          <div class="lg:col-span-7 toolkit-card p-4 sm:p-5 space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-base-content/10 pb-3">
+              <div>
+                <div class="font-bold text-sm flex items-center gap-2">
+                  <span>🔗 订阅与节点聚合中心</span>
+                  <span class="badge badge-sm badge-primary badge-outline font-mono text-[10px]">
+                    ${activeSubs} 启用 / ${subs.length} 源
+                  </span>
+                </div>
+                <div class="text-[11px] text-base-content/50 mt-0.5 font-mono">
+                  已聚合节点: <span class="font-bold text-primary">${totalNodes}</span> · 输出至 airport-merged-sub.yaml
+                </div>
+              </div>
+              <button class="btn btn-primary btn-xs font-normal" id="btn-toggle-add-sub">
+                ${subManagerState.showAddForm ? '✕ 收起' : '+ 添加订阅源'}
+              </button>
+            </div>
+
+            ${addFormHtml}
+            ${subListHtml}
+
+            <div class="p-3 rounded-lg bg-base-200/40 border border-base-content/5 text-[11px] text-base-content/60 flex items-center justify-between">
+              <span>💡 提示：聚合后的节点自动挂载进策略组 <code>🌐 订阅导入</code></span>
+              <a href="#/proxies" class="link link-primary text-[11px]">去 Proxies 选择节点 ➔</a>
+            </div>
+          </div>
+
+          <!-- 右侧: 规则分流与 DNS 污染推演模拟器 (5 Cols) -->
+          <div class="lg:col-span-5 toolkit-card p-4 sm:p-5 space-y-4">
+            <div class="border-b border-base-content/10 pb-3">
+              <div class="font-bold text-sm flex items-center gap-2">
+                <span>🎯 规则分流与 DNS 污染推演</span>
+              </div>
+              <div class="text-[11px] text-base-content/50 mt-0.5">
+                模拟域名匹配 Mihomo 路由规则链及 nameserver-policy 解析策略
+              </div>
+            </div>
+
+            <div class="space-y-2">
+              <div class="join w-full">
+                <input
+                  id="toolkit-sim-input"
+                  class="input input-sm input-bordered join-item w-full font-mono text-xs"
+                  placeholder="测试域名或 IP (如: api.openai.com)"
+                  value="${escapeHtml(ruleSimulatorState.input)}"
+                />
+                <button class="btn btn-sm btn-primary join-item font-normal" id="btn-toolkit-run-sim" ${simLoading ? 'disabled' : ''}>
+                  推演
+                </button>
+              </div>
+
+              <!-- 快捷测试标签 -->
+              <div class="flex flex-wrap items-center gap-1.5 pt-1">
+                <span class="text-[10px] text-base-content/40 mr-0.5">快捷:</span>
+                ${['api.openai.com', 'claude.ai', 'github.com', 'google.com', 'bilibili.com'].map(d => `
+                  <span class="badge badge-xs badge-ghost cursor-pointer hover:badge-primary quick-sim-tag font-mono text-[10px]" data-domain="${d}">
+                    ${d}
+                  </span>
+                `).join('')}
+              </div>
+            </div>
+
+            ${simOutputHtml}
+          </div>
         </div>
       </div>
-      ${resultHtml}
     `;
 
-    const inputEl = container.querySelector('#rule-sim-input');
-    const runBtn = container.querySelector('#btn-run-rule-sim');
-    const clearBtn = container.querySelector('#btn-clear-sim-res');
+    // --- 事件绑定 ---
+    // 刷新全部
+    viewContainer.querySelector('#btn-refresh-all')?.addEventListener('click', () => {
+      fetchEgressIp(true);
+      fetchSubscriptions();
+    });
 
-    if (inputEl) {
-      inputEl.oninput = (e) => { ruleSimulatorState.input = e.target.value; };
-      inputEl.onkeydown = (e) => {
-        if (e.key === 'Enter') {
-          ruleSimulatorState.input = inputEl.value;
-          simulateRule(inputEl.value);
+    // 出口看板按钮
+    viewContainer.querySelector('#btn-retest-egress')?.addEventListener('click', () => fetchEgressIp(true));
+    viewContainer.querySelector('#btn-toggle-egress-details')?.addEventListener('click', () => {
+      egressBadgeState.showDetails = !egressBadgeState.showDetails;
+      renderToolkitPage();
+    });
+
+    // 订阅操作按钮
+    viewContainer.querySelector('#btn-toggle-add-sub')?.addEventListener('click', () => {
+      subManagerState.showAddForm = !subManagerState.showAddForm;
+      renderToolkitPage();
+    });
+    viewContainer.querySelector('#btn-empty-add-sub')?.addEventListener('click', () => {
+      subManagerState.showAddForm = true;
+      renderToolkitPage();
+    });
+    viewContainer.querySelector('#btn-cancel-add-sub')?.addEventListener('click', () => {
+      subManagerState.showAddForm = false;
+      renderToolkitPage();
+    });
+    viewContainer.querySelector('#btn-close-sub-form')?.addEventListener('click', () => {
+      subManagerState.showAddForm = false;
+      renderToolkitPage();
+    });
+    viewContainer.querySelector('#btn-close-sub-form-2')?.addEventListener('click', () => {
+      subManagerState.showAddForm = false;
+      renderToolkitPage();
+    });
+
+    // Tab 切换
+    viewContainer.querySelector('#tab-mode-url')?.addEventListener('click', () => {
+      subManagerState.activeTab = 'url';
+      renderToolkitPage();
+    });
+    viewContainer.querySelector('#tab-mode-raw')?.addEventListener('click', () => {
+      subManagerState.activeTab = 'raw';
+      renderToolkitPage();
+    });
+
+    // 提交订阅 URL
+    viewContainer.querySelector('#btn-submit-sub-url')?.addEventListener('click', () => {
+      const name = (viewContainer.querySelector('#input-sub-name')?.value || '').trim();
+      const url = (viewContainer.querySelector('#input-sub-url')?.value || '').trim();
+      const filter = (viewContainer.querySelector('#input-sub-filter')?.value || '').trim();
+      if (!name || !url) {
+        showToast('请填写订阅名称和 URL', 'info');
+        return;
+      }
+      submitAddSubscription(name, url, filter);
+    });
+
+    // 提交粘贴节点
+    viewContainer.querySelector('#btn-submit-sub-raw')?.addEventListener('click', () => {
+      const name = (viewContainer.querySelector('#input-raw-name')?.value || '').trim();
+      const raw = (viewContainer.querySelector('#input-raw-content')?.value || '').trim();
+      if (!name || !raw) {
+        showToast('请填写前缀名称并粘贴节点链接', 'info');
+        return;
+      }
+      submitImportNodes(name, raw);
+    });
+
+    // 订阅列表项操作
+    viewContainer.querySelectorAll('.btn-update-sub').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        const id = e.currentTarget.getAttribute('data-id');
+        if (id) updateSubscription(id);
+      });
+    });
+    viewContainer.querySelectorAll('.btn-toggle-sub').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        const id = e.currentTarget.getAttribute('data-id');
+        const enabled = e.currentTarget.getAttribute('data-enabled') === '1';
+        if (id) toggleSubscription(id, !enabled);
+      });
+    });
+    viewContainer.querySelectorAll('.btn-del-sub').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        const id = e.currentTarget.getAttribute('data-id');
+        const name = e.currentTarget.getAttribute('data-name');
+        if (id) deleteSubscription(id, name);
+      });
+    });
+
+    // 推演模拟操作
+    const simInput = viewContainer.querySelector('#toolkit-sim-input');
+    const simRunBtn = viewContainer.querySelector('#btn-toolkit-run-sim');
+    simRunBtn?.addEventListener('click', () => runRuleSimulation(simInput?.value));
+    simInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runRuleSimulation(simInput.value);
+    });
+    viewContainer.querySelector('#btn-clear-sim')?.addEventListener('click', () => {
+      ruleSimulatorState.result = null;
+      ruleSimulatorState.error = null;
+      renderToolkitPage();
+    });
+    viewContainer.querySelectorAll('.quick-sim-tag').forEach((tag) => {
+      tag.addEventListener('click', (e) => {
+        const domain = e.currentTarget.getAttribute('data-domain');
+        if (domain) {
+          if (simInput) simInput.value = domain;
+          runRuleSimulation(domain);
         }
-      };
-    }
-
-    if (runBtn) {
-      runBtn.onclick = () => {
-        const val = inputEl ? inputEl.value : ruleSimulatorState.input;
-        simulateRule(val);
-      };
-    }
-
-    if (clearBtn) {
-      clearBtn.onclick = () => {
-        ruleSimulatorState.result = null;
-        ruleSimulatorState.error = null;
-        renderRuleSimulator();
-      };
-    }
-  }
-
-  function injectRuleSimulatorBar() {
-    const isRulesPage = location.hash.startsWith('#/rules');
-    const existing = document.getElementById('rule-simulator-bar-container');
-
-    if (!isRulesPage) {
-      if (existing) existing.remove();
-      return;
-    }
-
-    if (existing && document.body.contains(existing)) return;
-
-    // Search anchor inside rules page
-    const searchInput = findSearchInput();
-    if (!searchInput) return;
-
-    const row = (searchInput.closest('.toolbar, nav, .navbar, .container, .card, [data-testid]') || searchInput.parentElement);
-    if (!row) return;
-
-    const container = document.createElement('div');
-    container.id = 'rule-simulator-bar-container';
-
-    // Insert right below the search / toolbar row
-    row.insertAdjacentElement('afterend', container);
-    renderRuleSimulator();
+      });
+    });
   }
 
   // ==========================================
-  // 4. 自定义规则管理 (UserRulesModal)
+  // 6. 路由管理与页面切换调度
+  // ==========================================
+  function syncRouteView() {
+    const isToolkit = isToolkitRoute();
+
+    // 查找主内容区域
+    const homePage = document.querySelector('.home-page');
+    let mainArea = null;
+    if (homePage) {
+      mainArea = homePage.querySelector('.flex-1') || homePage.lastElementChild;
+    }
+
+    let toolkitView = document.getElementById('zashboard-toolkit-view');
+
+    if (isToolkit) {
+      // 激活工具箱页面：隐藏原生 SPA 的其他子元素
+      if (mainArea) {
+        Array.from(mainArea.children).forEach((child) => {
+          if (child.id !== 'zashboard-toolkit-view') {
+            child.style.display = 'none';
+          }
+        });
+
+        if (!toolkitView) {
+          toolkitView = document.createElement('div');
+          toolkitView.id = 'zashboard-toolkit-view';
+          toolkitView.className = 'p-4 md:p-6 bg-base-100 text-base-content';
+          mainArea.appendChild(toolkitView);
+          // 初次进入拉取数据
+          fetchEgressIp(false);
+          fetchSubscriptions();
+        }
+        toolkitView.style.display = 'block';
+        renderToolkitPage();
+      }
+    } else {
+      // 切回原生页面（如 Overview, Proxies, Rules 等）
+      if (toolkitView) {
+        toolkitView.style.display = 'none';
+      }
+      if (mainArea) {
+        Array.from(mainArea.children).forEach((child) => {
+          if (child.id !== 'zashboard-toolkit-view') {
+            if (child.style.display === 'none') {
+              child.style.display = '';
+            }
+          }
+        });
+      }
+    }
+
+    // 侧边栏 Item 的 active 样式同步
+    syncSidebarActive(isToolkit);
+  }
+
+  // ==========================================
+  // 7. 侧边栏导航注入
+  // ==========================================
+  function syncSidebarActive(isToolkit) {
+    const sidebarItem = document.getElementById('sidebar-item-toolkit');
+    if (!sidebarItem) return;
+    const a = sidebarItem.querySelector('a');
+    if (!a) return;
+
+    if (isToolkit) {
+      a.className = 'sidebar-tab-active justify-center relative z-10 py-2';
+      // 移除原生菜单项的激活类，避免双高亮
+      document.querySelectorAll('ul.sidebar-route-menu > li:not(#sidebar-item-toolkit) a.sidebar-tab-active').forEach((el) => {
+        el.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+      });
+    } else {
+      a.className = 'hover:bg-base-300! justify-center relative z-10 py-2';
+    }
+  }
+
+  function injectSidebarItem() {
+    const menuUl = document.querySelector('ul.sidebar-route-menu');
+    if (!menuUl) return;
+
+    let item = document.getElementById('sidebar-item-toolkit');
+    if (!item) {
+      item = document.createElement('li');
+      item.id = 'sidebar-item-toolkit';
+      item.className = '';
+      item.innerHTML = `
+        <a class="hover:bg-base-300! justify-center relative z-10 py-2" title="网络工具箱 (订阅聚合/出口诊断/分流推演)" href="#/toolkit">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" class="h-5 w-5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+          </svg>
+        </a>
+      `;
+      item.querySelector('a')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        location.hash = '#/toolkit';
+      });
+
+      // 插入在设置（通常是最后一个）之前，或直接追加
+      const lastLi = menuUl.lastElementChild;
+      if (lastLi && menuUl.children.length >= 4) {
+        menuUl.insertBefore(item, lastLi);
+      } else {
+        menuUl.appendChild(item);
+      }
+    }
+
+    syncSidebarActive(isToolkitRoute());
+  }
+
+  // ==========================================
+  // 8. #/rules 页面保留的自定义规则管理 Modal
   // ==========================================
   async function fetchUserRules() {
+    userRulesState.loading = true;
     try {
-      userRulesState.loading = true;
       const apiEndpoint = getPanelApiBase('user-rules');
       const res = await fetch(apiEndpoint, { headers: getAuthHeaders() });
-      if (!res.ok) throw new Error('Status ' + res.status);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       userRulesState.rules = data.rules || [];
-      if (Array.isArray(data.available_targets)) {
-        userRulesState.targets = data.available_targets;
-      }
+      userRulesState.targets = data.targets || ['DIRECT', 'REJECT', 'GLOBAL'];
     } catch (e) {
-      console.warn('Failed to fetch user-rules:', e);
+      showToast('拉取自定义规则失败: ' + e.message, 'error');
     } finally {
       userRulesState.loading = false;
       if (userRulesState.showModal && userRulesState.viewMode !== 'add') {
@@ -1014,62 +1188,47 @@
     }
   }
 
+  async function saveUserRule(type, payload, target) {
+    try {
+      const apiEndpoint = getPanelApiBase('user-rules');
+      const res = await fetch(apiEndpoint, {
+        method: 'POST',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({ type, payload, target, enabled: true }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('✅ 规则保存成功并已热重载生效！', 'success');
+        if (data.rule) {
+          userRulesState.rules = [data.rule, ...userRulesState.rules.filter((r) => r.id !== data.rule.id)];
+        }
+        userRulesState.viewMode = 'list';
+        renderModal();
+        fetchUserRules();
+      } else {
+        showToast('保存失败: ' + (data.error || '未知错误'), 'error');
+      }
+    } catch (e) {
+      showToast('请求异常: ' + e.message, 'error');
+    }
+  }
+
   async function deleteUserRule(ruleId) {
-    if (!confirm('确定要删除此自定义规则吗？删除后将自动热重载生效。')) return;
     try {
       const apiEndpoint = getPanelApiBase('user-rules') + '/' + encodeURIComponent(ruleId);
       const res = await fetch(apiEndpoint, {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.success) {
-        const errMsg = data.error || (data.reconcile && data.reconcile.error) || res.statusText || '删除失败';
-        alert('删除失败: ' + errMsg);
-        return;
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('规则已删除并热重载生效', 'info');
+        await fetchUserRules();
+      } else {
+        showToast('删除失败: ' + (data.error || '未知错误'), 'error');
       }
-      showToast('🗑️ 规则已删除并热重载生效！', 'success');
-      await fetchUserRules();
     } catch (e) {
-      alert('请求错误: ' + e.message);
-    }
-  }
-
-  async function saveUserRule(ruleData, submitBtn) {
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.textContent = '保存并生效中...';
-    }
-    try {
-      const apiEndpoint = getPanelApiBase('user-rules');
-      const res = await fetch(apiEndpoint, {
-        method: 'POST',
-        headers: getAuthHeaders(true),
-        body: JSON.stringify(ruleData),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.success) {
-        const errMsg = data.error || (data.reconcile && data.reconcile.error) || res.statusText || '保存失败';
-        alert('保存失败: ' + errMsg);
-        return false;
-      }
-      showToast('✅ 规则保存成功并已热重载生效！', 'success');
-      if (data.rule && data.rule.id) {
-        const exists = userRulesState.rules.some((r) => r.id === data.rule.id);
-        if (!exists) userRulesState.rules = [data.rule, ...userRulesState.rules];
-      }
-      userRulesState.viewMode = 'list';
-      renderModal();
-      await fetchUserRules();
-      return true;
-    } catch (e) {
-      alert('请求错误: ' + e.message);
-      return false;
-    } finally {
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.textContent = '保存并生效';
-      }
+      showToast('删除异常: ' + e.message, 'error');
     }
   }
 
@@ -1084,304 +1243,204 @@
       modalEl = document.createElement('div');
       modalEl.id = 'user-rules-manager-modal';
       modalEl.className = 'user-rules-modal-backdrop';
+      modalEl.onclick = (e) => {
+        if (e.target === modalEl) {
+          userRulesState.showModal = false;
+          renderModal();
+        }
+      };
       document.body.appendChild(modalEl);
     }
 
-    const currentLabel = getActiveBackendLabel();
-
-    if (userRulesState.viewMode === 'add') {
-      const ruleTypes = [
-        'DOMAIN-SUFFIX',
-        'DOMAIN',
-        'DOMAIN-KEYWORD',
-        'IP-CIDR',
-        'IP-CIDR6',
-        'GEOSITE',
-        'GEOIP',
-      ];
-      const targetOptions = userRulesState.targets
-        .map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)
-        .join('');
-
-      modalEl.innerHTML = `
-        <div class="user-rules-modal-content">
-          <div class="user-rules-modal-header">
-            <div class="flex items-center gap-2">
-              <button class="btn btn-ghost btn-sm btn-circle" id="btn-back-to-list">
-                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
-              </button>
-              <h3 class="font-bold text-sm">新增自定义规则 <span class="badge badge-sm badge-outline text-[10px] ml-1 font-mono">${escapeHtml(currentLabel)}</span></h3>
-            </div>
-            <button class="btn btn-ghost btn-sm btn-circle" id="btn-close-modal">✕</button>
-          </div>
-          <div class="user-rules-modal-body flex flex-col gap-3.5">
-            <div>
-              <label class="block text-xs font-medium mb-1.5 opacity-70">规则类型</label>
-              <select id="modal-rule-type" class="select select-bordered select-sm w-full font-mono">
-                ${ruleTypes.map((t) => `<option value="${t}">${t}</option>`).join('')}
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-medium mb-1.5 opacity-70">匹配目标 (Payload)</label>
-              <input id="modal-rule-payload" class="input input-bordered input-sm w-full font-mono" placeholder="如: example.com 或 1.1.1.1/32" />
-            </div>
-            <div>
-              <label class="block text-xs font-medium mb-1.5 opacity-70">分流策略 (Target)</label>
-              <select id="modal-rule-target" class="select select-bordered select-sm w-full">
-                ${targetOptions}
-              </select>
-            </div>
-            <div class="p-2.5 bg-base-200/60 rounded-lg text-xs font-mono break-all opacity-80" id="modal-rule-preview">
-              预览: DOMAIN-SUFFIX,,DIRECT
-            </div>
-            <div class="flex justify-end gap-2 mt-2">
-              <button class="btn btn-sm" id="btn-cancel-add">取消</button>
-              <button class="btn btn-sm btn-primary" id="btn-submit-add">保存并生效</button>
-            </div>
-          </div>
-        </div>
-      `;
-
-      const typeEl = modalEl.querySelector('#modal-rule-type');
-      const payloadEl = modalEl.querySelector('#modal-rule-payload');
-      const targetEl = modalEl.querySelector('#modal-rule-target');
-      const previewEl = modalEl.querySelector('#modal-rule-preview');
-
-      function updatePreview() {
-        const t = typeEl ? typeEl.value : '';
-        const p = payloadEl && payloadEl.value ? payloadEl.value.trim() : '';
-        const tg = targetEl ? targetEl.value : '';
-        if (previewEl) previewEl.textContent = 'Mihomo: ' + `${t},${p || '...'},${tg}`;
-      }
-
-      typeEl.addEventListener('change', updatePreview);
-      payloadEl.addEventListener('input', updatePreview);
-      targetEl.addEventListener('change', updatePreview);
-      updatePreview();
-
-      modalEl.querySelector('#btn-back-to-list').onclick = () => {
-        userRulesState.viewMode = 'list';
-        renderModal();
-      };
-      modalEl.querySelector('#btn-cancel-add').onclick = () => {
-        userRulesState.viewMode = 'list';
-        renderModal();
-      };
-      modalEl.querySelector('#btn-close-modal').onclick = () => {
-        userRulesState.showModal = false;
-        renderModal();
-      };
-      modalEl.querySelector('#btn-submit-add').onclick = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const liveType = document.getElementById('modal-rule-type');
-        const livePayload = document.getElementById('modal-rule-payload');
-        const liveTarget = document.getElementById('modal-rule-target');
-        const payload = (livePayload ? livePayload.value : payloadEl.value).trim();
-        if (!payload) {
-          alert('请输入匹配目标 (Payload)');
-          return;
-        }
-        const submitBtn = e.currentTarget || e.target;
-        await saveUserRule({
-          type: (liveType || typeEl).value,
-          payload: payload,
-          target: (liveTarget || targetEl).value,
-          enabled: true,
-        }, submitBtn);
-      };
-      return;
-    }
-
-    // List view
-    const rows = userRulesState.rules.length
-      ? userRulesState.rules
-          .map(
-            (r) => `
-          <tr class="hover:bg-base-200/50 transition-colors">
-            <td><span class="badge badge-sm badge-outline badge-primary font-mono text-[11px]">${escapeHtml(r.type)}</span></td>
-            <td class="font-mono text-xs font-medium max-w-[180px] truncate" title="${escapeHtml(r.payload)}">${escapeHtml(r.payload)}</td>
-            <td><span class="badge badge-sm badge-ghost text-success font-medium text-[11px]">${escapeHtml(r.target)}</span></td>
-            <td class="text-[11px] opacity-60">${r.updatedAt ? escapeHtml(r.updatedAt.split('T')[0]) : 'UI'}</td>
-            <td class="text-right">
-              <button class="btn btn-xs btn-error btn-outline" data-delete-id="${escapeHtml(r.id)}">删除</button>
-            </td>
-          </tr>
-        `
-          )
-          .join('')
-      : `<tr><td colspan="5" class="text-center py-8 opacity-50 text-xs">暂无自定义规则，点击右上角“+ 新增规则”添加</td></tr>`;
-
+    const isAdd = userRulesState.viewMode === 'add';
     modalEl.innerHTML = `
       <div class="user-rules-modal-content">
         <div class="user-rules-modal-header">
           <div class="flex items-center gap-2">
-            <svg class="h-4 w-4 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-            </svg>
-            <h3 class="font-bold text-sm">自定义规则管理 <span class="badge badge-sm badge-outline text-[10px] ml-1 font-mono">${escapeHtml(currentLabel)}</span></h3>
-            <span class="badge badge-sm badge-neutral text-[11px]">${userRulesState.rules.length}</span>
+            <span class="text-lg">🛡️</span>
+            <h3 class="font-bold text-sm">用户自定义分流规则</h3>
           </div>
-          <div class="flex items-center gap-1.5">
-            <button class="btn btn-xs btn-primary font-normal" id="btn-go-add">+ 新增规则</button>
-            <button class="btn btn-ghost btn-xs btn-circle" id="btn-close-modal">✕</button>
-          </div>
+          <button class="btn btn-ghost btn-xs btn-circle" id="btn-close-modal">✕</button>
         </div>
-        <div class="user-rules-modal-body p-0">
-          <div class="overflow-x-auto">
-            <table class="table table-sm w-full">
-              <thead>
-                <tr class="opacity-70 text-[11px]">
-                  <th>类型</th>
-                  <th>匹配目标</th>
-                  <th>策略</th>
-                  <th>更新时间</th>
-                  <th class="text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rows}
-              </tbody>
-            </table>
-          </div>
+        <div class="user-rules-modal-body">
+          ${isAdd ? `
+            <div class="space-y-4">
+              <div>
+                <label class="label"><span class="label-text text-xs">规则类型 (Type)</span></label>
+                <select class="select select-bordered select-sm w-full font-mono text-xs" id="modal-rule-type">
+                  <option value="DOMAIN-SUFFIX">DOMAIN-SUFFIX (域名后缀)</option>
+                  <option value="DOMAIN">DOMAIN (精确域名)</option>
+                  <option value="DOMAIN-KEYWORD">DOMAIN-KEYWORD (域名关键字)</option>
+                  <option value="IP-CIDR">IP-CIDR (目标 IP 段)</option>
+                </select>
+              </div>
+              <div>
+                <label class="label"><span class="label-text text-xs">匹配内容 (Payload)</span></label>
+                <input class="input input-bordered input-sm w-full font-mono text-xs" id="modal-rule-payload" placeholder="例如: example.com 或 1.1.1.1/32" />
+              </div>
+              <div>
+                <label class="label"><span class="label-text text-xs">出口目标 / 策略组 (Target)</span></label>
+                <select class="select select-bordered select-sm w-full font-mono text-xs" id="modal-rule-target">
+                  ${userRulesState.targets.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="flex justify-end gap-2 pt-2">
+                <button class="btn btn-ghost btn-sm" id="btn-cancel-add">返回列表</button>
+                <button class="btn btn-primary btn-sm" id="btn-save-rule">保存并生效</button>
+              </div>
+            </div>
+          ` : `
+            <div>
+              <div class="flex justify-between items-center mb-3">
+                <span class="text-xs opacity-70">共 ${userRulesState.rules.length} 条自定义规则</span>
+                <button class="btn btn-primary btn-xs" id="btn-go-add">+ 新增规则</button>
+              </div>
+              ${userRulesState.loading ? `
+                <div class="py-8 text-center text-xs opacity-60">加载中...</div>
+              ` : userRulesState.rules.length === 0 ? `
+                <div class="py-8 text-center text-xs opacity-50 border border-dashed rounded-lg">暂无自定义规则</div>
+              ` : `
+                <div class="space-y-2">
+                  ${userRulesState.rules.map((r) => `
+                    <div class="p-2.5 rounded-lg bg-base-200 flex items-center justify-between gap-2 text-xs font-mono">
+                      <div class="flex items-center gap-2 overflow-hidden">
+                        <span class="badge badge-sm badge-outline">${escapeHtml(r.type)}</span>
+                        <span class="font-bold truncate">${escapeHtml(r.payload)}</span>
+                        <span class="opacity-50">➔</span>
+                        <span class="badge badge-sm badge-neutral">${escapeHtml(r.target)}</span>
+                      </div>
+                      <button class="btn btn-ghost btn-xs text-error btn-del-rule" data-id="${escapeHtml(r.id)}">删除</button>
+                    </div>
+                  `).join('')}
+                </div>
+              `}
+            </div>
+          `}
         </div>
       </div>
     `;
 
-    modalEl.querySelector('#btn-go-add').onclick = () => {
-      userRulesState.viewMode = 'add';
-      renderModal();
-    };
-    modalEl.querySelector('#btn-close-modal').onclick = () => {
+    modalEl.querySelector('#btn-close-modal')?.addEventListener('click', () => {
       userRulesState.showModal = false;
       renderModal();
-    };
-    modalEl.querySelectorAll('[data-delete-id]').forEach((btn) => {
-      btn.onclick = () => {
-        const id = btn.getAttribute('data-delete-id');
+    });
+    modalEl.querySelector('#btn-go-add')?.addEventListener('click', () => {
+      userRulesState.viewMode = 'add';
+      renderModal();
+    });
+    modalEl.querySelector('#btn-cancel-add')?.addEventListener('click', () => {
+      userRulesState.viewMode = 'list';
+      renderModal();
+    });
+    modalEl.querySelector('#btn-save-rule')?.addEventListener('click', () => {
+      const type = modalEl.querySelector('#modal-rule-type')?.value;
+      const payload = (modalEl.querySelector('#modal-rule-payload')?.value || '').trim();
+      const target = modalEl.querySelector('#modal-rule-target')?.value;
+      if (!payload) {
+        showToast('请填写匹配内容', 'info');
+        return;
+      }
+      saveUserRule(type, payload, target);
+    });
+    modalEl.querySelectorAll('.btn-del-rule').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        const id = e.currentTarget.getAttribute('data-id');
         if (id) deleteUserRule(id);
-      };
+      });
     });
   }
 
   function createRulesButton() {
     const btn = document.createElement('button');
     btn.id = 'user-rules-top-action-btn';
-    btn.className = 'btn btn-circle btn-sm';
-    btn.type = 'button';
-    btn.title = '自定义规则管理';
-    btn.innerHTML = `
-      <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-      </svg>
-    `;
-    btn.onclick = (e) => {
-      e.stopPropagation();
+    btn.className = 'btn btn-sm btn-ghost gap-1.5 border border-base-content/20 font-normal';
+    btn.innerHTML = `<span>🛡️</span><span class="hidden sm:inline">自定义规则</span>`;
+    btn.onclick = () => {
       userRulesState.showModal = true;
       userRulesState.viewMode = 'list';
-      fetchUserRules();
       renderModal();
+      fetchUserRules();
     };
     return btn;
   }
 
-  function checkBackendChange() {
-    const currentActiveUuid = localStorage.getItem('setup/active-uuid') || '';
-    if (userRulesState.lastActiveUuid && userRulesState.lastActiveUuid !== currentActiveUuid) {
-      userRulesState.lastActiveUuid = currentActiveUuid;
-      fetchUserRules();
-      fetchEgressIp(true);
-      if (subManagerState.showModal) fetchSubscriptions();
-    } else {
-      userRulesState.lastActiveUuid = currentActiveUuid;
+  function injectRulesPageButton() {
+    if (!location.hash.startsWith('#/rules')) {
+      const b = document.getElementById('user-rules-top-action-btn');
+      if (b) b.remove();
+      return;
     }
-  }
 
-  // ---- 注入锚点定位 ----------------------------------------------------
-  const MAX_PLACEMENT_TRIES = 30;
-  let placementFailures = 0;
+    if (document.getElementById('user-rules-top-action-btn')) return;
 
-  function isSearchInput(input) {
-    const ph = input.getAttribute && (input.getAttribute('placeholder') || '');
-    return !!(ph && (ph.includes('Regex') || ph.includes('搜索') || ph.includes('Search')));
-  }
+    // 优先锚点：搜索输入框
+    const searchInput = Array.from(document.querySelectorAll('input')).find((i) => {
+      const ph = i.getAttribute('placeholder') || '';
+      return ph.includes('Regex') || ph.includes('搜索') || ph.includes('Search');
+    });
 
-  function findSearchInput() {
-    const inputs = Array.from(document.querySelectorAll('input'));
-    return inputs.find(isSearchInput) || null;
-  }
+    if (!searchInput) return;
 
-  function nearestGearBtn(anchor) {
-    let row = anchor ? (anchor.parentElement || anchor) : null;
-    while (row && row !== document.body && row !== document.documentElement) {
-      const directBtns = Array.from(row.children).filter((ch) => {
-        if (ch.tagName !== 'BUTTON') return false;
-        const cls = ch.className || '';
-        return cls.includes('btn-circle') && cls.includes('btn-sm') && !cls.includes('btn-xs');
-      });
-      if (directBtns.length > 0) return directBtns[directBtns.length - 1];
+    // 找齿轮按钮行
+    let row = searchInput.parentElement;
+    let gearBtn = null;
+    while (row && row !== document.body) {
+      const btns = Array.from(row.querySelectorAll('button.btn-circle.btn-sm'));
+      if (btns.length > 0) {
+        gearBtn = btns[btns.length - 1];
+        break;
+      }
       row = row.parentElement;
     }
-    return null;
-  }
 
-  function injectRulesAndSubButtons() {
-    checkBackendChange();
-    injectEgressBadge();
-
-    const isRulesPage = location.hash.startsWith('#/rules');
-    const existingRulesBtn = document.getElementById('user-rules-top-action-btn');
-    const existingSubBtn = document.getElementById('sub-manager-top-action-btn');
-
-    if (!isRulesPage) {
-      placementFailures = 0;
-      if (existingRulesBtn) existingRulesBtn.remove();
-      if (existingSubBtn) existingSubBtn.remove();
-      const simBar = document.getElementById('rule-simulator-bar-container');
-      if (simBar) simBar.remove();
-      return;
-    }
-
-    injectRuleSimulatorBar();
-
-    if (existingRulesBtn && document.body.contains(existingRulesBtn) && existingSubBtn && document.body.contains(existingSubBtn)) {
-      placementFailures = 0;
-      return;
-    }
-
-    const searchInput = findSearchInput();
-    if (!searchInput) {
-      placementFailures += 1;
-      if (placementFailures >= MAX_PLACEMENT_TRIES && placementFailures % 20 === 0) {
-        console.error(
-          '[user-rules-ui] 已在 #/rules 但持续找不到注入锚点（zashboard 布局可能变化）。'
-        );
-      }
-      return;
-    }
-
-    placementFailures = 0;
-    const gearBtn = nearestGearBtn(searchInput);
-    const subBtn = existingSubBtn || createSubButton();
-    const rulesBtn = existingRulesBtn || createRulesButton();
-
+    const btn = createRulesButton();
     if (gearBtn) {
-      if (!existingSubBtn) gearBtn.insertAdjacentElement('beforebegin', subBtn);
-      if (!existingRulesBtn) gearBtn.insertAdjacentElement('beforebegin', rulesBtn);
-    } else {
-      const row = (searchInput.closest('.toolbar, nav, .navbar, .container, .card, [data-testid]') || searchInput.parentElement);
-      if (!existingSubBtn) row.insertAdjacentElement('afterbegin', subBtn);
-      if (!existingRulesBtn) row.insertAdjacentElement('afterbegin', rulesBtn);
+      gearBtn.insertAdjacentElement('beforebegin', btn);
+    } else if (searchInput.parentElement) {
+      searchInput.parentElement.insertAdjacentElement('afterbegin', btn);
     }
   }
 
+  // ==========================================
+  // 9. 节点切换检测与自愈
+  // ==========================================
+  function checkBackendChange() {
+    try {
+      const active = getActiveBackend();
+      if (!active) return;
+      if (userRulesState.lastActiveUuid && userRulesState.lastActiveUuid !== active.uuid) {
+        // 节点发生切换，重刷状态
+        egressBadgeState.data = null;
+        egressBadgeState.lastChecked = 0;
+        fetchEgressIp(true);
+        if (isToolkitRoute()) {
+          fetchSubscriptions();
+        }
+      }
+      userRulesState.lastActiveUuid = active.uuid;
+    } catch (_) {}
+  }
+
+  // ==========================================
+  // 10. 全局调度主循环
+  // ==========================================
+  function mainLoop() {
+    checkBackendChange();
+    injectSidebarItem();
+    injectFloatingEgressPill();
+    syncRouteView();
+    injectRulesPageButton();
+  }
+
+  // DOM 观察与全局事件监听
   const observer = new MutationObserver(() => {
-    injectRulesAndSubButtons();
+    mainLoop();
   });
   observer.observe(document.body, { childList: true, subtree: true });
 
-  window.addEventListener('hashchange', injectRulesAndSubButtons);
-  setInterval(injectRulesAndSubButtons, 300);
-  injectRulesAndSubButtons();
-})();
+  window.addEventListener('hashchange', mainLoop);
+  setInterval(mainLoop, 400);
 
+  // 立即触发一次
+  mainLoop();
+})();
