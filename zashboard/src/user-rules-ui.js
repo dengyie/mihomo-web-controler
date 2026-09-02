@@ -175,7 +175,7 @@
     if (!container) {
       container = document.createElement('div');
       container.id = 'zashboard-toast-container';
-      container.className = 'toast toast-top toast-end z-50 mt-14 mr-4';
+      container.className = 'toast toast-bottom toast-end z-50 mb-6 mr-6';
       document.body.appendChild(container);
     }
     const alertEl = document.createElement('div');
