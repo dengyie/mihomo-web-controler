@@ -151,7 +151,23 @@
   }
 
   function getApiBase() {
-    if (activeBackendUuid === 'backend-pxed-default') {
+    resolveBackendAndSecret();
+    try {
+      const apiListRaw = localStorage.getItem('setup/api-list');
+      if (apiListRaw) {
+        const apiList = JSON.parse(apiListRaw);
+        const cur = apiList.find((item) => item.uuid === activeBackendUuid);
+        if (cur && cur.secondaryPath) {
+          return cur.secondaryPath;
+        }
+        if (cur && cur.label && cur.label.toLowerCase().includes('pxed')) {
+          return '/panel/pxed/api';
+        }
+      }
+    } catch {
+      // ignore
+    }
+    if (activeBackendUuid && activeBackendUuid.toLowerCase().includes('pxed')) {
       return '/panel/pxed/api';
     }
     return '/panel/api';
@@ -204,8 +220,13 @@
       egressBadgeState.data = null;
       egressBadgeState.lastFetched = 0;
       egressBadgeState.detailsOpen = false;
+      egressBadgeState.error = null;
       subscriptionState.list = [];
       ruleSimulatorState.result = null;
+      if (isToolkitRoute()) {
+        fetchEgressIp(true);
+        fetchSubscriptions();
+      }
     }
   }
 
@@ -718,7 +739,7 @@
           </div>
           <div class="flex min-w-0 flex-1 items-center justify-end gap-3">
             <div class="min-w-0 text-right">
-              <div class="truncate font-mono text-sm">${escapeHtml(ipData?.ip || (isEgressLoading ? '正在多源竞速测速...' : '未获取到有效出口'))}</div>
+              <div class="truncate font-mono text-sm">${escapeHtml(ipData?.ip || (isEgressLoading ? '正在多源竞速测速...' : (egressBadgeState.error ? `测速异常: ${egressBadgeState.error}` : '未获取到有效出口')))}</div>
               <div class="truncate text-xs text-base-content/60">${escapeHtml([ipData?.country, ipData?.city].filter(Boolean).join(' '))}${ipData?.org ? ` · ${escapeHtml(ipData.org)}` : ''}</div>
             </div>
             <span class="w-14 shrink-0 text-right font-mono text-sm ${latencyClass(latency)}">${latency != null ? `${latency}ms` : '--'}</span>

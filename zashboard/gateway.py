@@ -248,8 +248,10 @@ def _is_cacheable(method: str, api_p: str) -> bool:
         return False                      # live latency tests
     if api_p.endswith('/healthcheck'):
         return False
-    if api_p.startswith('/user-rules') or api_p.startswith('/storage'):
-        return False
+    if (api_p.startswith('/user-rules') or api_p.startswith('/storage') or
+            api_p.startswith('/diagnostics') or api_p.startswith('/subscriptions') or
+            '/simulate' in api_p):
+        return False                      # dynamic features & live diagnostics -> never cache
     return True
 
 
@@ -1040,8 +1042,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers.pop('Accept-Encoding', None)
         headers['Accept-Encoding'] = 'identity'
         headers['Host'] = f'{remote_ip}:{remote_port}'
-        if 'Authorization' not in headers:
-            headers['Authorization'] = 'Bearer ' + panel_password()
+        # Ensure valid inter-gateway authentication across the cluster (tebi <-> pxed)
+        pw = panel_password()
+        if pw:
+            headers['Authorization'] = 'Bearer ' + pw
         length = int(self.headers.get('Content-Length', '0'))
         body = self.rfile.read(length) if length else None
         try:
