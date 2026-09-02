@@ -4,6 +4,52 @@
 (function () {
   'use strict';
 
+  // ==========================================
+  // Awesome UI Kit: 标准原子图标库 (UiIcon)
+  // 严禁使用 Emoji / 临时 Unicode 字符
+  // ==========================================
+  const ICONS = {
+    'arrow-down': '<path d="m6 9 6 6 6-6"/>',
+    'arrow-left': '<path d="m15 6-6 6 6 6"/>',
+    'arrow-right': '<path d="m9 6 6 6-6 6"/>',
+    'arrow-up': '<path d="m6 15 6-6 6 6"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
+    'check-circle': '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
+    'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+    'chevron-left': '<path d="m14 6-6 6 6 6"/>',
+    'chevron-right': '<path d="m10 6 6 6-6 6"/>',
+    'circle-x': '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
+    code: '<path d="m8 9-3 3 3 3m8-6 3 3-3 3M14 5l-4 14"/>',
+    copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+    eye: '<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>',
+    'external-link': '<path d="M14 5h5v5M19 5l-8 8M19 14v3a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    layers: '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5m-18 4 9 5 9-5"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    loader: '<path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/>',
+    pause: '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>',
+    play: '<polygon points="5 3 19 12 5 21 5 3"/>',
+    plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    refresh: '<path d="M20 11a8 8 0 0 0-14.5-4L3 10m0-5v5h5M4 13a8 8 0 0 0 14.5 4L21 14m0 5v-5h-5"/>',
+    shield: '<path d="M12 3a12 12 0 0 0 8.5 3A12 12 0 0 1 12 21 12 12 0 0 1 3.5 6 12 12 0 0 0 12 3Z"/>',
+    sparkles: '<path d="m12 3-1.2 4.8L6 9l4.8 1.2L12 15l1.2-4.8L18 9l-4.8-1.2L12 3Z"/>',
+    target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+    tool: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.2 2.2-2.7-.7-.7-2.7 2.2-2.2Z"/>',
+    trash: '<path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2m-6 5v6m4-6v6"/>',
+    'alert-triangle': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    x: '<path d="m6 6 12 12M18 6 6 18"/>',
+  };
+
+  function escapeAttribute(value) {
+    return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
+  }
+
+  function uiIcon(name, { size = 16, strokeWidth = 1.8, label = '', className = '' } = {}) {
+    const aria = label ? `aria-label="${escapeAttribute(label)}"` : 'aria-hidden="true"';
+    return `<svg width="${escapeAttribute(size)}" height="${escapeAttribute(size)}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${escapeAttribute(strokeWidth)}" stroke-linecap="round" stroke-linejoin="round" class="${escapeAttribute(className)}" ${aria}>${ICONS[name] || ''}</svg>`;
+  }
+
   function escapeHtml(str) {
     if (str == null) return '';
     return String(str)
@@ -12,17 +58,6 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
-  }
-
-  function getFlagEmoji(countryCode) {
-    if (!countryCode || countryCode.length !== 2) return '🌐';
-    const code = countryCode.toUpperCase();
-    const codePoints = [...code].map((c) => 127397 + c.charCodeAt(0));
-    try {
-      return String.fromCodePoint(...codePoints);
-    } catch {
-      return '🌐';
-    }
   }
 
   // ==========================================
@@ -382,7 +417,9 @@
       modal.className = 'modal modal-bottom sm:modal-middle';
       modal.innerHTML = `
         <div class="modal-box max-w-5xl w-11/12 max-h-[90vh] p-4 md:p-6 bg-base-100 text-base-content shadow-2xl border border-base-300 custom-scrollbar flex flex-col relative">
-          <button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3 text-base-content/60 hover:text-base-content" id="btn-close-toolkit-modal">✕</button>
+          <button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3 text-base-content/60 hover:text-base-content" id="btn-close-toolkit-modal" aria-label="关闭">
+            ${uiIcon('x', { size: 16 })}
+          </button>
           <div id="zashboard-toolkit-modal-body" class="flex-1 overflow-y-auto custom-scrollbar pr-1"></div>
         </div>
         <form method="dialog" class="modal-backdrop">
@@ -420,14 +457,15 @@
     const fastest = egressBadgeState.data?.fastest;
     const ipData = fastest?.data;
     const latency = fastest?.latency_ms ? Math.round(fastest.latency_ms) : null;
-    const flag = ipData?.country_code ? getFlagEmoji(ipData.country_code) : '🌐';
     const isEgressLoading = egressBadgeState.loading;
 
     let egressCardHtml = `
       <div class="card bg-base-200/50 border border-base-300 p-4 mb-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div class="flex items-center gap-3">
-            <span class="text-3xl">${flag}</span>
+            <div class="p-2 rounded-lg bg-primary/10 text-primary">
+              ${uiIcon('globe', { size: 24 })}
+            </div>
             <div>
               <div class="flex items-center gap-2">
                 <span class="text-base font-bold font-mono">${escapeHtml(ipData?.ip || (isEgressLoading ? '正在竞速测速...' : '未获取'))}</span>
@@ -441,10 +479,10 @@
           </div>
           <div class="flex items-center gap-2 self-end sm:self-auto">
             <button class="btn btn-xs btn-outline gap-1" id="btn-modal-reprobe-egress" ${isEgressLoading ? 'disabled' : ''}>
-              ${isEgressLoading ? '<span class="loading loading-spinner loading-xs"></span>' : '⚡'} 重新测速
+              ${isEgressLoading ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('refresh', { size: 12 })} 重新测速
             </button>
-            <button class="btn btn-xs btn-ghost text-base-content/60" id="btn-toggle-egress-details">
-              竞速明细 ▼
+            <button class="btn btn-xs btn-ghost text-base-content/60 gap-1" id="btn-toggle-egress-details">
+              竞速明细 ${uiIcon('chevron-down', { size: 12 })}
             </button>
           </div>
         </div>
@@ -474,7 +512,7 @@
       subsTableRows = `
         <tr>
           <td colspan="5" class="text-center py-6 text-base-content/40 text-xs">
-            暂无已导入订阅源，点击右上角 "+ 添加订阅" 快速添加
+            暂无已导入订阅源，点击右上角 "+ 添加源" 快速添加
           </td>
         </tr>
       `;
@@ -501,15 +539,15 @@
             </td>
             <td class="text-right space-x-1">
               ${s.type !== 'raw' ? `
-                <button class="btn btn-xs btn-ghost sub-btn-update" data-id="${escapeHtml(s.id)}" ${isUpdating ? 'disabled' : ''}>
-                  ${isUpdating ? '<span class="loading loading-spinner loading-xs"></span>' : '🔄'}
+                <button class="btn btn-xs btn-ghost sub-btn-update" data-id="${escapeHtml(s.id)}" title="更新订阅" ${isUpdating ? 'disabled' : ''}>
+                  ${isUpdating ? '<span class="loading loading-spinner loading-xs"></span>' : uiIcon('refresh', { size: 12 })}
                 </button>
               ` : ''}
-              <button class="btn btn-xs btn-ghost sub-btn-toggle" data-id="${escapeHtml(s.id)}" data-enabled="${s.enabled}" ${isToggling ? 'disabled' : ''}>
-                ${s.enabled ? '⏸️' : '▶️'}
+              <button class="btn btn-xs btn-ghost sub-btn-toggle" data-id="${escapeHtml(s.id)}" data-enabled="${s.enabled}" title="${s.enabled ? '暂停' : '启用'}" ${isToggling ? 'disabled' : ''}>
+                ${uiIcon(s.enabled ? 'pause' : 'play', { size: 12 })}
               </button>
-              <button class="btn btn-xs btn-ghost text-error sub-btn-delete" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" ${isDeleting ? 'disabled' : ''}>
-                🗑️
+              <button class="btn btn-xs btn-ghost text-error sub-btn-delete" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" title="删除" ${isDeleting ? 'disabled' : ''}>
+                ${uiIcon('trash', { size: 12 })}
               </button>
             </td>
           </tr>
@@ -524,10 +562,14 @@
         <div class="bg-base-200/60 p-3 rounded-lg border border-base-300 mb-3 space-y-3">
           <div class="flex items-center justify-between">
             <div class="tabs tabs-boxed bg-base-100 p-0.5">
-              <a class="tab tab-xs ${isSubTab ? 'tab-active' : ''}" id="tab-switch-sub">🔗 Clash 订阅链接</a>
-              <a class="tab tab-xs ${!isSubTab ? 'tab-active' : ''}" id="tab-switch-nodes">📝 节点分享链接导入</a>
+              <a class="tab tab-xs gap-1 ${isSubTab ? 'tab-active' : ''}" id="tab-switch-sub">
+                ${uiIcon('link', { size: 12 })} Clash 订阅链接
+              </a>
+              <a class="tab tab-xs gap-1 ${!isSubTab ? 'tab-active' : ''}" id="tab-switch-nodes">
+                ${uiIcon('layers', { size: 12 })} 节点分享链接导入
+              </a>
             </div>
-            <button class="btn btn-xs btn-ghost" id="btn-cancel-add-sub">✕ 取消</button>
+            <button class="btn btn-xs btn-ghost" id="btn-cancel-add-sub">${uiIcon('x', { size: 12 })} 取消</button>
           </div>
 
           ${isSubTab ? `
@@ -573,8 +615,9 @@
       `;
     } else if (simError) {
       simOutputHtml = `
-        <div class="alert alert-error text-xs py-2">
-          <span>❌ 推演失败: ${escapeHtml(simError)}</span>
+        <div class="alert alert-error text-xs py-2 gap-2">
+          ${uiIcon('circle-x', { size: 14, className: 'shrink-0' })}
+          <span>推演失败: ${escapeHtml(simError)}</span>
         </div>
       `;
     } else if (simResult) {
@@ -592,12 +635,14 @@
             ${escapeHtml(match?.raw || 'MATCH (Fallback)')}
           </div>
           ${warnings.length > 0 ? `
-            <div class="alert alert-warning py-1.5 px-2 text-[11px] rounded">
-              <span>⚠️ ${escapeHtml(warnings[0])}</span>
+            <div class="alert alert-warning py-1.5 px-2 text-[11px] rounded gap-1.5">
+              ${uiIcon('alert-triangle', { size: 14, className: 'shrink-0' })}
+              <span>${escapeHtml(warnings[0])}</span>
             </div>
           ` : `
-            <div class="text-[11px] text-success">
-              ✅ DNS 策略安全，未检测到境内明文解析污染
+            <div class="flex items-center gap-1.5 text-[11px] text-success">
+              ${uiIcon('check-circle', { size: 13, className: 'shrink-0' })}
+              <span>DNS 策略安全，未检测到境内明文解析污染</span>
             </div>
           `}
         </div>
@@ -609,7 +654,10 @@
       <div class="space-y-4">
         <div class="flex items-center justify-between border-b border-base-300 pb-3">
           <div class="flex items-center gap-2">
-            <h2 class="text-lg font-bold">🛠️ 网络聚合与诊断工具箱</h2>
+            <div class="flex items-center gap-1.5 text-lg font-bold">
+              ${uiIcon('tool', { size: 20, className: 'text-primary' })}
+              <span>网络聚合与诊断工具箱</span>
+            </div>
             <span class="badge badge-sm badge-outline font-mono">${escapeHtml(activeBackendUuid.replace('backend-', '').replace('-default', ''))}</span>
           </div>
         </div>
@@ -622,12 +670,13 @@
           <!-- 左栏：订阅与节点中心 -->
           <div class="card bg-base-200/50 border border-base-300 p-4">
             <div class="flex items-center justify-between mb-3">
-              <div class="flex items-center gap-2">
-                <span class="font-bold text-sm">🔗 订阅与节点聚合</span>
+              <div class="flex items-center gap-1.5">
+                ${uiIcon('link', { size: 16, className: 'text-primary' })}
+                <span class="font-bold text-sm">订阅与节点聚合</span>
                 ${isSubLoading ? '<span class="loading loading-spinner loading-xs"></span>' : ''}
               </div>
-              <button class="btn btn-xs btn-primary font-normal" id="btn-show-add-sub">
-                + 添加源
+              <button class="btn btn-xs btn-primary font-normal gap-1" id="btn-show-add-sub">
+                ${uiIcon('plus', { size: 12 })} 添加源
               </button>
             </div>
 
@@ -652,8 +701,9 @@
 
           <!-- 右栏：规则分流与 DNS 推演 -->
           <div class="card bg-base-200/50 border border-base-300 p-4">
-            <div class="flex items-center justify-between mb-3">
-              <span class="font-bold text-sm">🎯 规则分流与 DNS 污染推演</span>
+            <div class="flex items-center gap-1.5 mb-3">
+              ${uiIcon('target', { size: 16, className: 'text-primary' })}
+              <span class="font-bold text-sm">规则分流与 DNS 污染推演</span>
             </div>
 
             <div class="space-y-2 mb-3">
@@ -768,11 +818,7 @@
       btn.id = 'btn-topbar-toolkit';
       btn.className = 'btn btn-circle btn-sm';
       btn.title = '网络工具箱 (订阅聚合 / 出口竞速 / 分流推演)';
-      btn.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.336l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437 1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z" />
-        </svg>
-      `;
+      btn.innerHTML = uiIcon('tool', { size: 16 });
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         openToolkitModal();
@@ -787,11 +833,7 @@
       sideBtn.id = 'btn-sidebar-bottom-toolkit';
       sideBtn.className = 'btn btn-circle btn-sm';
       sideBtn.title = '网络工具箱 (订阅/出口/推演)';
-      sideBtn.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-4 w-4">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
-        </svg>
-      `;
+      sideBtn.innerHTML = uiIcon('tool', { size: 16 });
       sideBtn.addEventListener('click', (e) => {
         e.preventDefault();
         openToolkitModal();
@@ -821,7 +863,7 @@
     const btn = document.createElement('button');
     btn.id = 'user-rules-top-action-btn';
     btn.className = 'btn btn-sm btn-outline gap-1.5 font-normal';
-    btn.innerHTML = `<span>🛡️</span> 自定义规则`;
+    btn.innerHTML = `${uiIcon('shield', { size: 14 })} 自定义规则`;
     btn.addEventListener('click', openUserRulesModal);
     topBar.appendChild(btn);
   }
@@ -835,9 +877,14 @@
       modal.className = 'modal modal-bottom sm:modal-middle';
       modal.innerHTML = `
         <div class="modal-box max-w-4xl w-11/12 p-4 md:p-6 bg-base-100 text-base-content border border-base-300 shadow-2xl">
-          <button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3" id="btn-close-rules-modal">✕</button>
+          <button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3" id="btn-close-rules-modal" aria-label="关闭">
+            ${uiIcon('x', { size: 16 })}
+          </button>
           <div class="flex items-center justify-between border-b border-base-300 pb-3 mb-4">
-            <h3 class="font-bold text-base">🛡️ 用户自定义规则权威源管理</h3>
+            <div class="flex items-center gap-1.5 font-bold text-base">
+              ${uiIcon('shield', { size: 18, className: 'text-primary' })}
+              <span>用户自定义规则权威源管理</span>
+            </div>
           </div>
           <div id="user-rules-modal-content" class="space-y-4">
             <p class="text-xs text-base-content/60">正在从权威源同步用户规则...</p>
@@ -864,7 +911,7 @@
       userRulesState.rules = json.data?.rules || [];
       renderUserRulesModal();
     } catch (e) {
-      container.innerHTML = `<div class="alert alert-error text-xs">加载失败: ${escapeHtml(e.message)}</div>`;
+      container.innerHTML = `<div class="alert alert-error text-xs gap-1.5">${uiIcon('circle-x', { size: 14 })} 加载失败: ${escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -875,7 +922,9 @@
     container.innerHTML = `
       <div class="flex justify-between items-center text-xs">
         <span class="text-base-content/60">当前已生效自定义规则数: <b class="font-mono text-base-content">${rules.length}</b></span>
-        <button class="btn btn-xs btn-outline gap-1" id="btn-refresh-user-rules">🔄 刷新</button>
+        <button class="btn btn-xs btn-outline gap-1" id="btn-refresh-user-rules">
+          ${uiIcon('refresh', { size: 12 })} 刷新
+        </button>
       </div>
       <div class="overflow-x-auto max-h-64 border border-base-300 rounded-lg custom-scrollbar">
         <table class="table table-xs w-full">
