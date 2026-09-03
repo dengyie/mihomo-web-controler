@@ -1041,6 +1041,7 @@ class SubscriptionEngine:
         max_workers: int = 5,
         timeout_ms: int = 2500,
         batch_pause_sec: float = 0.3,
+        max_candidates: int = 30,
         test_url: str = "http://www.gstatic.com/generate_204",
         controller_api: str = "http://127.0.0.1:9090",
         controller_secret: Optional[str] = None,
@@ -1101,6 +1102,10 @@ class SubscriptionEngine:
         # Exclude already disabled nodes from testing
         existing_disabled = load_disabled_nodes(self.disabled_file)
         to_test = [n for n in leaf_names if n not in existing_disabled]
+
+        # Safety: default cap to max 30 candidates per invocation to prevent long-running blocking requests
+        if max_candidates and len(to_test) > max_candidates:
+            to_test = to_test[:max_candidates]
 
         total_to_test = len(to_test)
         tested_count = 0

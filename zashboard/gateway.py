@@ -665,9 +665,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             query_params = parse_qs(urlsplit(self.path).query)
             batch_size_str = query_params.get('batch_size', ['15'])[0]
             max_workers_str = query_params.get('max_workers', ['5'])[0]
+            max_cand_str = query_params.get('max_candidates', ['30'])[0]
             dry_run_str = query_params.get('dry_run', ['false'])[0].lower()
             batch_size = int(batch_size_str) if batch_size_str.isdigit() else 15
             max_workers = int(max_workers_str) if max_workers_str.isdigit() else 5
+            max_candidates = int(max_cand_str) if max_cand_str.isdigit() else 30
             dry_run = dry_run_str in ('true', '1', 'yes')
 
             try:
@@ -684,6 +686,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 res = engine.prune_dead_nodes(
                     batch_size=batch_size,
                     max_workers=max_workers,
+                    max_candidates=max_candidates,
                     apply_filter=not dry_run,
                 )
                 if res.get('success'):
