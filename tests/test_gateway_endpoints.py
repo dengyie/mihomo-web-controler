@@ -187,6 +187,14 @@ class GatewayEndpointsTests(unittest.TestCase):
         res4 = h4.get_json()
         self.assertFalse(res4['data']['subscription']['enabled'])
 
+        # 4b. PATCH toggle / update subscription
+        h4b = _FakeRequestHarness(self.gw, 'PATCH', f'/panel/api/subscriptions/{sub_id}',
+                                  body=json.dumps({'enabled': True}), auth_token=self.token)
+        self.gw.Handler._dispatch(h4b.handler, 'PATCH')
+        self.assertEqual(h4b.response_status, 200)
+        res4b = h4b.get_json()
+        self.assertTrue(res4b['data']['subscription']['enabled'])
+
         # 5. POST update subscription
         h5 = _FakeRequestHarness(self.gw, 'POST', f'/panel/api/subscriptions/{sub_id}/update',
                                  body=json.dumps({'name': 'UpdatedAirport', 'enabled': True}), auth_token=self.token)

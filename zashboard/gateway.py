@@ -609,6 +609,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {'status': 'error', 'error': res.get('error', 'Toggle failed'), 'data': res})
             return
 
+        # PATCH /panel/api/subscriptions/<sub_id> (Standard REST partial update)
+        if method == 'PATCH' and len(parts) == 1:
+            sub_id = parts[0]
+            name = payload.get('name')
+            url = payload.get('url')
+            raw_content = payload.get('raw_content')
+            exclude_filter = payload.get('exclude_filter')
+            enabled = payload.get('enabled')
+            refresh = payload.get('refresh', False)
+
+            res = engine.update_subscription(
+                sub_id=sub_id,
+                name=name,
+                url=url,
+                raw_content=raw_content,
+                exclude_filter=exclude_filter,
+                enabled=enabled,
+                refresh=refresh,
+            )
+            if res.get('success'):
+                cache_invalidate('local')
+                self.send_json(200, {'status': 'ok', 'data': res})
+            else:
+                self.send_json(404 if 'not found' in res.get('error', '').lower() else 400, {
+                    'status': 'error',
+                    'error': res.get('error', 'Update failed'),
+                    'data': res,
+                })
+            return
+
         # DELETE /panel/api/subscriptions/<sub_id>
         if method == 'DELETE' and len(parts) == 1:
             sub_id = parts[0]
