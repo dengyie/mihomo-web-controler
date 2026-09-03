@@ -2,8 +2,9 @@ import base64
 import importlib.util
 import json
 import sys
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -578,4 +579,81 @@ def test_policy_group_auto_mount_and_consistency(temp_clash_root):
     assert "[Airport Alpha] Hong Kong" in proxy_names3
     groups_map3 = {g["name"]: g for g in cfg_data3["proxy-groups"]}
     assert "[Airport Beta] Singapore" not in groups_map3["🌐 订阅导入"]["proxies"]
+
+
+def test_prune_dead_nodes_and_disabled_filtering(temp_clash_root, monkeypatch):
+    config_path = temp_clash_root / "config.yaml"
+    initial_config = {
+        'proxies': [
+            {'name': 'GVPS-TUIC-googlevps', 'type': 'tuic'},
+            {'name': 'Dead-Node-1', 'type': 'ss'},
+            {'name': 'Alive-Node-1', 'type': 'ss'},
+        ],
+        'proxy-groups': [
+            {'name': 'PROXY', 'type': 'select', 'proxies': ['GVPS-TUIC-googlevps', 'Dead-Node-1', 'Alive-Node-1']},
+            {'name': '🌐 订阅导入', 'type': 'select', 'proxies': ['Dead-Node-1', 'Alive-Node-1']},
+        ]
+    }
+    config_path.write_text(yaml.safe_dump(initial_config))
+
+    engine = SubscriptionEngine(root=temp_clash_root)
+
+    # Mock Mihomo controller /proxies and /proxies/{name}/delay endpoints
+    def mock_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, 'full_url') else req
+        if "/proxies" in url and "/delay" not in url:
+            # Return list of proxies
+            data = {
+                "proxies": {
+                    "GVPS-TUIC-googlevps": {"type": "Tuic"},
+                    "Dead-Node-1": {"type": "Shadowsocks"},
+                    "Alive-Node-1": {"type": "Shadowsocks"},
+                    "PROXY": {"type": "Selector"},
+                }
+            }
+            body = json.dumps(data).encode("utf-8")
+        elif "Dead-Node-1/delay" in url:
+            raise urllib.error.URLError("Connection timeout")
+        elif "Alive-Node-1/delay" in url:
+            data = {"delay": 120}
+            body = json.dumps(data).encode("utf-8")
+        else:
+            raise urllib.error.URLError("Not found")
+
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = None
+        return resp
+
+    monkeypatch.setattr(sm.urllib.request, "urlopen", mock_urlopen)
+
+    res = engine.prune_dead_nodes(batch_size=5, max_workers=2, apply_filter=True)
+    if not res.get("success"):
+        print("DEBUG PRUNE ERROR:", res)
+    assert res["success"] is True
+    assert res["total_candidates"] == 2  # GVPS- is whitelisted, excluded!
+    assert res["alive_count"] == 1
+    assert res["dead_count"] == 1
+    assert "Dead-Node-1" in res["newly_dead"]
+
+    # Verify disabled-nodes.txt contains Dead-Node-1
+    disabled_path = temp_clash_root / "airports/disabled-nodes.txt"
+    assert disabled_path.exists()
+    disabled_content = disabled_path.read_text()
+    assert "Dead-Node-1" in disabled_content
+
+    # Verify config.yaml was reconciled to exclude Dead-Node-1
+    updated_cfg = yaml.safe_load(config_path.read_text())
+    proxy_names = [p["name"] for p in updated_cfg["proxies"]]
+    assert "Dead-Node-1" not in proxy_names
+    assert "Alive-Node-1" in proxy_names
+    assert "GVPS-TUIC-googlevps" in proxy_names
+
+    # Verify proxy-groups cleaned
+    groups_map = {g["name"]: g for g in updated_cfg["proxy-groups"]}
+    assert "Dead-Node-1" not in groups_map["PROXY"]["proxies"]
+    assert "Alive-Node-1" in groups_map["PROXY"]["proxies"]
+    assert "GVPS-TUIC-googlevps" in groups_map["PROXY"]["proxies"]
+
 

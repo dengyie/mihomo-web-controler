@@ -90,6 +90,13 @@
     loading: false,
   };
 
+  // 死节点清理过滤状态
+  let pruneState = {
+    loading: false,
+    lastResult: null,
+    error: null,
+  };
+
   // ==========================================
   // 凭证与后端识别
   // ==========================================
@@ -277,6 +284,35 @@
         subscriptionState.loading = false;
         renderSubsSection();
       }
+    }
+  }
+
+  async function triggerPruneDeadNodes() {
+    if (pruneState.loading) return;
+    pruneState.loading = true;
+    pruneState.error = null;
+    renderSubsSection();
+
+    try {
+      showToast('正在低并发逐批检测死节点并进行健康过滤...', 'info');
+      const resp = await fetch(`${getApiBase()}/diagnostics/prune-dead-nodes?batch_size=15&max_workers=5`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      const json = await resp.json();
+      if (!resp.ok || json.status !== 'ok') {
+        throw new Error(json.error || `HTTP ${resp.status}`);
+      }
+      pruneState.lastResult = json.data;
+      showToast(`检测完成：存活 ${json.data?.alive_count || 0}，新增屏蔽死节点 ${json.data?.dead_count || 0} 个`, 'success');
+      // 刷新订阅与代理缓存
+      fetchSubscriptions();
+    } catch (err) {
+      pruneState.error = err.message || '清理检测异常';
+      showToast(`死节点清理失败: ${pruneState.error}`, 'error');
+    } finally {
+      pruneState.loading = false;
+      renderSubsSection();
     }
   }
 
@@ -869,6 +905,9 @@
       </div>
     ` : '';
 
+    const isPruning = pruneState.loading;
+    const lastPrune = pruneState.lastResult;
+
     slot.innerHTML = `
       <div class="settings-section-label">订阅与节点聚合</div>
       <div class="settings-grid">
@@ -877,8 +916,19 @@
             ${nativeIcon('link', 'h-4 w-4 shrink-0')}
             <span>订阅源管理${isSubLoading ? ' <span class="loading loading-spinner loading-xs"></span>' : ''}</span>
           </div>
-          <button class="btn btn-sm" id="btn-show-add-sub" ${isAnyBusy ? 'disabled' : ''}>${nativeIcon('plus', 'h-4 w-4')} 添加</button>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-sm btn-outline ${isPruning ? 'loading' : ''}" id="btn-prune-dead-nodes" title="分批平滑测试所有节点连通性，自动过滤死节点到黑名单" ${isAnyBusy || isPruning ? 'disabled' : ''}>
+              ${isPruning ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('shield-check', 'h-4 w-4')} 清理死节点
+            </button>
+            <button class="btn btn-sm" id="btn-show-add-sub" ${isAnyBusy || isPruning ? 'disabled' : ''}>${nativeIcon('plus', 'h-4 w-4')} 添加</button>
+          </div>
         </div>
+        ${lastPrune ? `
+          <div class="p-3 bg-base-200/50 rounded-box text-xs flex items-center justify-between gap-2">
+            <span class="text-base-content/70">上次死节点探测：测查 ${lastPrune.tested_count || 0} 个，存活 <span class="text-success font-semibold">${lastPrune.alive_count || 0}</span>，过滤死节点 <span class="text-error font-semibold">${lastPrune.dead_count || 0}</span></span>
+            <span class="text-base-content/40 text-[10px]">保护基础白名单出口</span>
+          </div>
+        ` : ''}
         ${addFormHtml}
         ${subRowsHtml || `<div class="p-4 text-xs text-base-content/40">暂无已导入订阅源，点击上方 "添加" 快速导入</div>`}
       </div>
@@ -892,6 +942,10 @@
         if (selStart !== null && selEnd !== null) restored.setSelectionRange(selStart, selEnd);
       } catch (e) {}
     }
+
+    slot.querySelector('#btn-prune-dead-nodes')?.addEventListener('click', () => {
+      triggerPruneDeadNodes();
+    });
 
     slot.querySelector('#btn-show-add-sub')?.addEventListener('click', () => {
       subscriptionState.addFormVisible = !subscriptionState.addFormVisible;

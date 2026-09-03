@@ -36,6 +36,7 @@ META_FILE = ROOT / 'subscriptions/meta.json'
 RAW_CACHE_DIR = ROOT / 'subscriptions/raw'
 MERGED_OUTPUT_FILE = ROOT / 'airports/airport-merged-sub.yaml'
 LOCK_FILE = ROOT / 'subscriptions/.subscription.lock'
+DISABLED_NODES_FILE = ROOT / 'airports/disabled-nodes.txt'
 
 # Default regex pattern to filter out announcement / non-functional nodes
 DEFAULT_EXCLUDE_FILTER = r'(剩余流量|更新日期|官网|套餐|重置|到期|过期|公告|流量|时间|群|客服|traffic|expire|reset|website|notice)'
@@ -152,8 +153,55 @@ def fast_yaml_dump(data: Any, **kwargs: Any) -> str:
     return yaml.dump(data, Dumper=_YamlSafeDumper, **kwargs)
 
 
-def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, Any]]) -> bool:
-    """Safely inject active subscription proxies into target config and maintain SUB_GROUP_NAME."""
+def load_disabled_nodes(disabled_path: Optional[Path] = None) -> Set[str]:
+    """Load denylist of confirmed dead/disabled node names from disabled-nodes.txt."""
+    path = disabled_path or DISABLED_NODES_FILE
+    if not path.exists():
+        return set()
+    try:
+        return {
+            line.strip()
+            for line in path.read_text(encoding='utf-8', errors='ignore').splitlines()
+            if line.strip() and not line.lstrip().startswith('#')
+        }
+    except Exception:
+        return set()
+
+
+def save_disabled_nodes(names: Set[str], disabled_path: Optional[Path] = None) -> None:
+    """Safely append or update disabled nodes list preserving comments."""
+    path = disabled_path or DISABLED_NODES_FILE
+    existing_lines: List[str] = []
+    if path.exists():
+        try:
+            existing_lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+        except Exception:
+            existing_lines = []
+
+    header_lines = [l for l in existing_lines if l.strip().startswith('#')]
+    if not header_lines:
+        header_lines = ["# Verified local import denylist; only explicitly confirmed dead nodes."]
+
+    existing_set = {
+        l.strip() for l in existing_lines
+        if l.strip() and not l.strip().startswith('#')
+    }
+    merged_set = existing_set | {n.strip() for n in names if n.strip()}
+    sorted_names = sorted(merged_set)
+
+    content = "\n".join(header_lines) + "\n" + "\n".join(sorted_names) + "\n"
+    safe_atomic_write(path, content)
+
+
+def reconcile_target_config(
+    target_path: Path,
+    active_proxies: Optional[List[Dict[str, Any]]] = None,
+    disabled_nodes: Optional[Set[str]] = None,
+) -> bool:
+    """Safely inject active subscription proxies into target config and maintain SUB_GROUP_NAME.
+    
+    If active_proxies is None, only filters out disabled_nodes without resetting subscription proxies.
+    """
     if not target_path.exists():
         return False
     try:
@@ -173,26 +221,38 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
         groups = []
         data['proxy-groups'] = groups
 
+    denylist = disabled_nodes if disabled_nodes is not None else load_disabled_nodes()
+
     # 1. Find previous sub group to identify previous subscription nodes
     sub_group = next((g for g in groups if isinstance(g, dict) and g.get('name') == SUB_GROUP_NAME), None)
     old_sub_node_names: Set[str] = set()
     if sub_group and isinstance(sub_group.get('proxies'), list):
         old_sub_node_names = {str(n) for n in sub_group['proxies']}
 
-    active_proxy_names = [p['name'] for p in active_proxies if isinstance(p, dict) and 'name' in p]
-    active_name_set = set(active_proxy_names)
+    if active_proxies is not None:
+        active_proxy_names = [p['name'] for p in active_proxies if isinstance(p, dict) and 'name' in p and p['name'] not in denylist]
+        active_name_set = set(active_proxy_names)
 
-    # 2. Filter out stale subscription nodes from proxies and add active proxies
-    kept_proxies = []
-    for p in proxies:
-        if isinstance(p, dict):
-            p_name = p.get('name')
-            if p_name in old_sub_node_names and p_name not in active_name_set:
-                continue
-            if p_name in active_name_set:
-                continue
-            kept_proxies.append(p)
-    kept_proxies.extend(active_proxies)
+        # Filter out stale subscription nodes and denylisted nodes from proxies and add active proxies
+        kept_proxies = []
+        for p in proxies:
+            if isinstance(p, dict):
+                p_name = p.get('name')
+                if p_name in denylist:
+                    continue
+                if p_name in old_sub_node_names and p_name not in active_name_set:
+                    continue
+                if p_name in active_name_set:
+                    continue
+                kept_proxies.append(p)
+        for p in active_proxies:
+            if isinstance(p, dict) and p.get('name') not in denylist:
+                kept_proxies.append(p)
+    else:
+        # Only prune denylisted nodes
+        kept_proxies = [p for p in proxies if isinstance(p, dict) and p.get('name') not in denylist]
+        active_proxy_names = [n for n in old_sub_node_names if n not in denylist]
+        active_name_set = set(active_proxy_names)
 
     # Check if proxies actually changed
     proxies_changed = (proxies != kept_proxies)
@@ -200,23 +260,25 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
 
     # 3. Maintain '🌐 订阅导入' proxy group
     groups_changed = False
-    if sub_group is None:
+    if sub_group is None and active_proxies is not None:
         sub_group = {'name': SUB_GROUP_NAME, 'type': 'select', 'proxies': ['DIRECT']}
         groups.append(sub_group)
         groups_changed = True
 
-    target_sub_proxies = list(active_proxy_names) if active_proxy_names else ['DIRECT']
-    if sub_group.get('proxies') != target_sub_proxies:
-        sub_group['proxies'] = target_sub_proxies
-        groups_changed = True
+    if sub_group is not None:
+        target_sub_proxies = list(active_proxy_names) if active_proxy_names else ['DIRECT']
+        if sub_group.get('proxies') != target_sub_proxies:
+            sub_group['proxies'] = target_sub_proxies
+            groups_changed = True
 
-    # 4. Clean up stale subscription node names from all other proxy groups
-    stale_sub_nodes = old_sub_node_names - active_name_set
+    # 4. Clean up stale subscription node names and disabled nodes from all other proxy groups
+    stale_sub_nodes = (old_sub_node_names - active_name_set) if active_proxies is not None else set()
+    removal_set = stale_sub_nodes | denylist
     for g in groups:
         if isinstance(g, dict) and 'proxies' in g and isinstance(g['proxies'], list):
             if g.get('name') == SUB_GROUP_NAME:
                 continue
-            cleaned = [n for n in g['proxies'] if n not in stale_sub_nodes]
+            cleaned = [n for n in g['proxies'] if n not in removal_set]
             if not cleaned:
                 cleaned = ['DIRECT']
             if cleaned != g['proxies']:
@@ -242,13 +304,14 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
     return True
 
 
-def get_paths(root: Optional[Path] = None) -> Tuple[Path, Path, Path, Path, Path]:
+def get_paths(root: Optional[Path] = None) -> Tuple[Path, Path, Path, Path, Path, Path]:
     base = root.resolve() if root else (Path(os.environ.get('CLASH_ROOT')).resolve() if os.environ.get('CLASH_ROOT') else ROOT)
     meta = base / 'subscriptions/meta.json'
     raw_dir = base / 'subscriptions/raw'
     merged = base / 'airports/airport-merged-sub.yaml'
     lock = base / 'subscriptions/.subscription.lock'
-    return base, meta, raw_dir, merged, lock
+    disabled = base / 'airports/disabled-nodes.txt'
+    return base, meta, raw_dir, merged, lock, disabled
 
 
 class SubscriptionLock:
@@ -256,7 +319,7 @@ class SubscriptionLock:
 
     def __init__(self, lock_file: Optional[Path] = None):
         if lock_file is None:
-            _, _, _, _, self.lock_path = get_paths()
+            _, _, _, _, self.lock_path, _ = get_paths()
         else:
             self.lock_path = lock_file
         self.lock_fd = None
@@ -784,7 +847,7 @@ class SubscriptionEngine:
     """Manages subscriptions, metadata, aggregation, and atomic file operations."""
 
     def __init__(self, root: Optional[Path] = None):
-        self.root, self.meta_file, self.raw_cache_dir, self.merged_output_file, self.lock_file = get_paths(root)
+        self.root, self.meta_file, self.raw_cache_dir, self.merged_output_file, self.lock_file, self.disabled_file = get_paths(root)
 
     def _get_cache_path(self, sub_id: str) -> Path:
         return self.raw_cache_dir / f"{sub_id}.raw"
@@ -972,6 +1035,135 @@ class SubscriptionEngine:
             self.reconcile_merged()
             return {'success': True, 'deleted': deleted}
 
+    def prune_dead_nodes(
+        self,
+        batch_size: int = 15,
+        max_workers: int = 5,
+        timeout_ms: int = 2500,
+        batch_pause_sec: float = 0.3,
+        test_url: str = "http://www.gstatic.com/generate_204",
+        controller_api: str = "http://127.0.0.1:9090",
+        controller_secret: Optional[str] = None,
+        whitelist_prefixes: Tuple[str, ...] = ("GVPS-", "Aliyun-", "DIRECT", "REJECT"),
+        apply_filter: bool = True,
+    ) -> Dict[str, Any]:
+        """Perform throttled, chunked health-check across active nodes and filter dead nodes into denylist.
+        
+        Key design requirements:
+          - Never test too many nodes at once (strict chunking with pause between batches).
+          - Low concurrency (default 5 workers) to avoid starving Mihomo controller or socket limits.
+          - Never disable whitelisted critical infrastructure nodes (e.g. GVPS-*, Aliyun-*).
+          - Atomic updates to disabled-nodes.txt and atomic reconciliation into config files.
+        """
+        import concurrent.futures
+        import time
+
+        secret = controller_secret
+        if secret is None:
+            secret_file = self.root / ".controller-secret"
+            if secret_file.exists():
+                try:
+                    secret = secret_file.read_text(encoding="utf-8").strip()
+                except Exception:
+                    secret = ""
+
+        headers = {}
+        if secret:
+            headers["Authorization"] = f"Bearer {secret}"
+
+        # 1. Fetch current proxy list from Mihomo controller
+        req = urllib.request.Request(f"{controller_api}/proxies", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                proxies_resp = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                proxies_map = proxies_resp.get("proxies", {})
+        except Exception as e:
+            return {"success": False, "error": f"Failed to fetch proxies from Mihomo: {e}"}
+
+        # 2. Extract leaf proxies (exclude proxy groups and built-in specials)
+        group_types = {
+            "Selector", "URLTest", "Fallback", "LoadBalance", "Relay",
+            "Direct", "Reject", "Compatible", "Pass", "PassRule", "RejectDrop"
+        }
+        leaf_names: List[str] = []
+        for name, p in proxies_map.items():
+            if not isinstance(p, dict):
+                continue
+            if p.get("type") in group_types:
+                continue
+            if name in ("DIRECT", "REJECT", "GLOBAL"):
+                continue
+            # Skip whitelisted prefixes
+            if any(name.startswith(pfx) for pfx in whitelist_prefixes):
+                continue
+            leaf_names.append(name)
+
+        # Exclude already disabled nodes from testing
+        existing_disabled = load_disabled_nodes(self.disabled_file)
+        to_test = [n for n in leaf_names if n not in existing_disabled]
+
+        total_to_test = len(to_test)
+        tested_count = 0
+        alive_nodes: List[Dict[str, Any]] = []
+        newly_dead: List[str] = []
+
+        def probe_node(name: str) -> Tuple[str, Optional[int]]:
+            t0 = time.perf_counter()
+            q_name = urllib.parse.quote(name, safe="")
+            q_url = urllib.parse.quote(test_url, safe="")
+            delay_url = f"{controller_api}/proxies/{q_name}/delay?timeout={timeout_ms}&url={q_url}"
+            try:
+                preq = urllib.request.Request(delay_url, headers=headers)
+                with urllib.request.urlopen(preq, timeout=(timeout_ms / 1000.0) + 2.0) as presp:
+                    res_data = json.loads(presp.read().decode("utf-8", errors="ignore"))
+                    delay = res_data.get("delay")
+                    if delay is not None and isinstance(delay, (int, float)):
+                        return name, int(delay)
+            except Exception:
+                pass
+            return name, None
+
+        # 3. Process in chunks to prevent CPU / socket spikes
+        for i in range(0, total_to_test, batch_size):
+            chunk = to_test[i:i + batch_size]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(probe_node, chunk))
+
+            for name, delay in results:
+                tested_count += 1
+                if delay is not None:
+                    alive_nodes.append({"name": name, "delay": delay})
+                else:
+                    newly_dead.append(name)
+
+            if i + batch_size < total_to_test and batch_pause_sec > 0:
+                time.sleep(batch_pause_sec)
+
+        # 4. Apply filter if requested
+        targets_updated = []
+        if apply_filter and newly_dead:
+            with SubscriptionLock(self.lock_file):
+                save_disabled_nodes(set(newly_dead), self.disabled_file)
+                all_disabled = load_disabled_nodes(self.disabled_file)
+
+                # Reconcile target configs (config.yaml, config.mac-merged.yaml)
+                for target in (self.root / 'config.mac-merged.yaml', self.root / 'config.yaml'):
+                    if target.exists():
+                        if reconcile_target_config(target, None, disabled_nodes=all_disabled):
+                            targets_updated.append(str(target))
+
+        return {
+            "success": True,
+            "total_candidates": total_to_test,
+            "tested_count": tested_count,
+            "alive_count": len(alive_nodes),
+            "dead_count": len(newly_dead),
+            "newly_dead": newly_dead,
+            "alive": alive_nodes[:20],  # Sample of alive nodes
+            "applied_filter": apply_filter,
+            "targets_updated": targets_updated,
+        }
+
     def list_subscriptions(self) -> List[Dict[str, Any]]:
         """List all subscriptions."""
         data = self.load_meta()
@@ -1050,11 +1242,14 @@ class SubscriptionEngine:
         rendered = fast_yaml_dump(merged_doc)
         safe_atomic_write(self.merged_output_file, rendered)
 
+        # Load denylist to filter from target configs
+        disabled_set = load_disabled_nodes(self.disabled_file)
+
         # Reconcile target configs (config.yaml, config.mac-merged.yaml) if they exist
         targets_updated = []
         for target in (self.root / 'config.mac-merged.yaml', self.root / 'config.yaml'):
             if target.exists():
-                if reconcile_target_config(target, all_proxies):
+                if reconcile_target_config(target, all_proxies, disabled_nodes=disabled_set):
                     targets_updated.append(str(target))
 
         return {
@@ -1078,9 +1273,22 @@ def main():
     parser.add_argument('--import-nodes', nargs=2, metavar=('NAME', 'TEXT'), help='Import nodes from raw text')
     parser.add_argument('--reconcile', action='store_true', help='Reconcile and regenerate merged airport config')
     parser.add_argument('--fetch', action='store_true', help='Force re-fetching remote subscriptions during reconcile')
+    parser.add_argument('--prune-dead', action='store_true', help='Test and prune dead nodes into disabled denylist')
+    parser.add_argument('--batch-size', type=int, default=15, help='Batch size for health checks (default: 15)')
+    parser.add_argument('--max-workers', type=int, default=5, help='Max concurrent workers for health checks (default: 5)')
+    parser.add_argument('--dry-run', action='store_true', help='Perform health checks without applying filter to configs')
     args = parser.parse_args()
 
     engine = SubscriptionEngine()
+
+    if args.prune_dead:
+        res = engine.prune_dead_nodes(
+            batch_size=args.batch_size,
+            max_workers=args.max_workers,
+            apply_filter=not args.dry_run,
+        )
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        sys.exit(0 if res.get('success') else 1)
 
     if args.list:
         subs = engine.list_subscriptions()

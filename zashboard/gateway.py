@@ -661,6 +661,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         subpath = rel_path[len('/panel/api/diagnostics'):].strip('/')
+        if subpath == 'prune-dead-nodes' and method in ('POST', 'GET'):
+            query_params = parse_qs(urlsplit(self.path).query)
+            batch_size_str = query_params.get('batch_size', ['15'])[0]
+            max_workers_str = query_params.get('max_workers', ['5'])[0]
+            dry_run_str = query_params.get('dry_run', ['false'])[0].lower()
+            batch_size = int(batch_size_str) if batch_size_str.isdigit() else 15
+            max_workers = int(max_workers_str) if max_workers_str.isdigit() else 5
+            dry_run = dry_run_str in ('true', '1', 'yes')
+
+            try:
+                engine = get_subscription_engine()
+            except SubscriptionEngineLoadError as e:
+                self.send_json(500, {'status': 'error', 'error': f'Subscription engine load error: {e}'})
+                return
+
+            try:
+                res = engine.prune_dead_nodes(
+                    batch_size=batch_size,
+                    max_workers=max_workers,
+                    apply_filter=not dry_run,
+                )
+                if res.get('success'):
+                    cache_invalidate('local')
+                    self.send_json(200, {'status': 'ok', 'data': res})
+                else:
+                    self.send_json(500, {'status': 'error', 'error': res.get('error', 'Prune failed'), 'data': res})
+            except Exception as e:
+                self.send_json(500, {'status': 'error', 'error': str(e)})
+            return
+
         if subpath == 'egress-ip' and method == 'GET':
             query_params = parse_qs(urlsplit(self.path).query)
             proxy_port_str = query_params.get('proxy_port', ['7897'])[0]
