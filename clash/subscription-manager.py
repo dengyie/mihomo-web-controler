@@ -201,12 +201,13 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
     # 3. Maintain '🌐 订阅导入' proxy group
     groups_changed = False
     if sub_group is None:
-        sub_group = {'name': SUB_GROUP_NAME, 'type': 'select', 'proxies': []}
+        sub_group = {'name': SUB_GROUP_NAME, 'type': 'select', 'proxies': ['DIRECT']}
         groups.append(sub_group)
         groups_changed = True
 
-    if sub_group.get('proxies') != active_proxy_names:
-        sub_group['proxies'] = list(active_proxy_names)
+    target_sub_proxies = list(active_proxy_names) if active_proxy_names else ['DIRECT']
+    if sub_group.get('proxies') != target_sub_proxies:
+        sub_group['proxies'] = target_sub_proxies
         groups_changed = True
 
     # 4. Clean up stale subscription node names from all other proxy groups
@@ -216,6 +217,8 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
             if g.get('name') == SUB_GROUP_NAME:
                 continue
             cleaned = [n for n in g['proxies'] if n not in stale_sub_nodes]
+            if not cleaned:
+                cleaned = ['DIRECT']
             if cleaned != g['proxies']:
                 g['proxies'] = cleaned
                 groups_changed = True
