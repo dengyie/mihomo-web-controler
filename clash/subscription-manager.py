@@ -126,12 +126,38 @@ def is_safe_public_url(url: str, allow_private: bool = False) -> Tuple[bool, str
     return True, ""
 
 
+# ---------------------------------------------------------
+# YAML Acceleration (CSafeLoader / CSafeDumper if available)
+# ---------------------------------------------------------
+_YamlSafeLoader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
+_YamlSafeDumper = getattr(yaml, 'CSafeDumper', yaml.SafeDumper)
+
+
+def fast_yaml_load(stream: Any) -> Any:
+    """Load YAML stream using C bindings if available for ~7x speedup."""
+    if hasattr(stream, 'read'):
+        content = stream.read()
+    else:
+        content = stream
+    if not content:
+        return None
+    return yaml.load(content, Loader=_YamlSafeLoader)
+
+
+def fast_yaml_dump(data: Any, **kwargs: Any) -> str:
+    """Dump YAML document using C bindings if available."""
+    kwargs.setdefault('allow_unicode', True)
+    kwargs.setdefault('sort_keys', False)
+    kwargs.setdefault('width', 120)
+    return yaml.dump(data, Dumper=_YamlSafeDumper, **kwargs)
+
+
 def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, Any]]) -> bool:
     """Safely inject active subscription proxies into target config and maintain SUB_GROUP_NAME."""
     if not target_path.exists():
         return False
     try:
-        data = yaml.safe_load(target_path.read_text()) or {}
+        data = fast_yaml_load(target_path.read_text(encoding='utf-8', errors='ignore')) or {}
         if not isinstance(data, dict):
             return False
     except Exception:
@@ -167,13 +193,21 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
                 continue
             kept_proxies.append(p)
     kept_proxies.extend(active_proxies)
+
+    # Check if proxies actually changed
+    proxies_changed = (proxies != kept_proxies)
     data['proxies'] = kept_proxies
 
     # 3. Maintain '🌐 订阅导入' proxy group
+    groups_changed = False
     if sub_group is None:
         sub_group = {'name': SUB_GROUP_NAME, 'type': 'select', 'proxies': []}
         groups.append(sub_group)
-    sub_group['proxies'] = list(active_proxy_names)
+        groups_changed = True
+
+    if sub_group.get('proxies') != active_proxy_names:
+        sub_group['proxies'] = list(active_proxy_names)
+        groups_changed = True
 
     # 4. Clean up stale subscription node names from all other proxy groups
     stale_sub_nodes = old_sub_node_names - active_name_set
@@ -181,7 +215,10 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
         if isinstance(g, dict) and 'proxies' in g and isinstance(g['proxies'], list):
             if g.get('name') == SUB_GROUP_NAME:
                 continue
-            g['proxies'] = [n for n in g['proxies'] if n not in stale_sub_nodes]
+            cleaned = [n for n in g['proxies'] if n not in stale_sub_nodes]
+            if cleaned != g['proxies']:
+                g['proxies'] = cleaned
+                groups_changed = True
 
     # 5. Auto-mount SUB_GROUP_NAME into generic routing groups if present
     for g in groups:
@@ -190,9 +227,14 @@ def reconcile_target_config(target_path: Path, active_proxies: List[Dict[str, An
             if isinstance(g_proxies, list):
                 if SUB_GROUP_NAME not in g_proxies:
                     g_proxies.append(SUB_GROUP_NAME)
+                    groups_changed = True
+
+    # Fast short-circuit: if neither proxies nor groups changed, skip expensive dump & disk write!
+    if not proxies_changed and not groups_changed:
+        return True
 
     # Write atomically
-    rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
+    rendered = fast_yaml_dump(data)
     safe_atomic_write(target_path, rendered)
     return True
 
@@ -655,7 +697,7 @@ def parse_raw_node_list(text: str) -> List[Dict[str, Any]]:
     joined_text = '\n'.join(lines_to_process)
     if 'proxies:' in joined_text or 'Proxy:' in joined_text:
         try:
-            yaml_data = yaml.safe_load(joined_text)
+            yaml_data = fast_yaml_load(joined_text)
             if isinstance(yaml_data, dict):
                 proxies = yaml_data.get('proxies') or yaml_data.get('Proxy')
                 if isinstance(proxies, list):
@@ -681,7 +723,7 @@ def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
         return []
 
     try:
-        data = yaml.safe_load(content)
+        data = fast_yaml_load(content)
         if isinstance(data, dict):
             proxies = data.get('proxies') or data.get('Proxy')
             if isinstance(proxies, list) and len(proxies) > 0:
@@ -1002,7 +1044,7 @@ class SubscriptionEngine:
             'proxies': all_proxies,
         }
 
-        rendered = yaml.safe_dump(merged_doc, allow_unicode=True, sort_keys=False, width=120)
+        rendered = fast_yaml_dump(merged_doc)
         safe_atomic_write(self.merged_output_file, rendered)
 
         # Reconcile target configs (config.yaml, config.mac-merged.yaml) if they exist

@@ -281,6 +281,7 @@
   }
 
   async function addSubscriptionUrl(name, url, excludeFilter) {
+    if (subscriptionState.actionInProgress) return;
     subscriptionState.actionInProgress = 'add-sub';
     renderSubsSection();
     try {
@@ -306,6 +307,7 @@
   }
 
   async function importRawNodes(name, content) {
+    if (subscriptionState.actionInProgress) return;
     subscriptionState.actionInProgress = 'import-nodes';
     renderSubsSection();
     try {
@@ -330,6 +332,7 @@
   }
 
   async function updateSubscription(subId) {
+    if (subscriptionState.actionInProgress) return;
     subscriptionState.actionInProgress = `update-${subId}`;
     renderSubsSection();
     try {
@@ -350,6 +353,7 @@
   }
 
   async function toggleSubscription(subId, enabled) {
+    if (subscriptionState.actionInProgress) return;
     subscriptionState.actionInProgress = `toggle-${subId}`;
     renderSubsSection();
     try {
@@ -366,11 +370,12 @@
       showToast('切换状态失败: ' + err.message, 'error');
     } finally {
       subscriptionState.actionInProgress = null;
-      renderToolkitSubpage();
+      renderSubsSection();
     }
   }
 
   async function deleteSubscription(subId, name) {
+    if (subscriptionState.actionInProgress) return;
     if (!confirm(`确定要删除订阅源 "${name}" 吗？其聚合节点将被同步移除。`)) return;
     subscriptionState.actionInProgress = `delete-${subId}`;
     renderSubsSection();
@@ -799,11 +804,13 @@
 
     const subs = subscriptionState.list || [];
     const isSubLoading = subscriptionState.loading;
+    const isAction = subscriptionState.actionInProgress;
+    const isAnyBusy = Boolean(isAction);
 
     const subRowsHtml = subs.map((s) => {
-      const isAction = subscriptionState.actionInProgress;
       const isUpdating = isAction === `update-${s.id}`;
       const isDeleting = isAction === `delete-${s.id}`;
+      const isToggling = isAction === `toggle-${s.id}`;
       const sourceDesc = s.url || (s.type === 'raw' ? '单节点批量导入' : '本地源');
       return `
         <div class="setting-item p-4">
@@ -811,14 +818,17 @@
             <span class="truncate">${escapeHtml(s.name)}</span>
             <span class="truncate font-mono text-xs text-base-content/40">${escapeHtml(sourceDesc)}</span>
           </div>
-          <span class="shrink-0 text-xs text-base-content/40">${s.node_count || 0} 节点</span>
-          <input type="checkbox" class="sub-toggle toggle" data-id="${escapeHtml(s.id)}" aria-label="${s.enabled ? '停用' : '启用'}${escapeHtml(s.name)}" ${s.enabled ? 'checked' : ''} />
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="text-xs text-base-content/40">${s.node_count || 0} 节点</span>
+            ${isToggling ? '<span class="loading loading-spinner loading-xs text-primary" title="更新中..."></span>' : ''}
+            <input type="checkbox" class="sub-toggle toggle toggle-sm" data-id="${escapeHtml(s.id)}" aria-label="${s.enabled ? '停用' : '启用'}${escapeHtml(s.name)}" ${s.enabled ? 'checked' : ''} ${isAnyBusy ? 'disabled' : ''} />
+          </div>
           ${s.type !== 'raw' ? `
-            <button class="sub-btn-update btn btn-circle btn-ghost btn-xs h-5 min-h-5 w-5 shrink-0 p-0" data-id="${escapeHtml(s.id)}" aria-label="更新${escapeHtml(s.name)}" ${isUpdating ? 'disabled' : ''}>
+            <button class="sub-btn-update btn btn-circle btn-ghost btn-xs h-5 min-h-5 w-5 shrink-0 p-0" data-id="${escapeHtml(s.id)}" aria-label="更新${escapeHtml(s.name)}" ${isUpdating ? 'disabled' : (isAnyBusy ? 'disabled' : '')}>
               ${isUpdating ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('arrow-path', 'h-3.5 w-3.5')}
             </button>
           ` : ''}
-          <button class="sub-btn-delete btn btn-circle btn-ghost btn-xs h-5 min-h-5 w-5 shrink-0 p-0 text-base-content/40 hover:text-error" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" aria-label="删除${escapeHtml(s.name)}" ${isDeleting ? 'disabled' : ''}>
+          <button class="sub-btn-delete btn btn-circle btn-ghost btn-xs h-5 min-h-5 w-5 shrink-0 p-0 text-base-content/40 hover:text-error" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}" aria-label="删除${escapeHtml(s.name)}" ${isDeleting ? 'disabled' : (isAnyBusy ? 'disabled' : '')}>
             ${nativeIcon('trash', 'h-3.5 w-3.5')}
           </button>
         </div>
@@ -867,7 +877,7 @@
             ${nativeIcon('link', 'h-4 w-4 shrink-0')}
             <span>订阅源管理${isSubLoading ? ' <span class="loading loading-spinner loading-xs"></span>' : ''}</span>
           </div>
-          <button class="btn btn-sm" id="btn-show-add-sub">${nativeIcon('plus', 'h-4 w-4')} 添加</button>
+          <button class="btn btn-sm" id="btn-show-add-sub" ${isAnyBusy ? 'disabled' : ''}>${nativeIcon('plus', 'h-4 w-4')} 添加</button>
         </div>
         ${addFormHtml}
         ${subRowsHtml || `<div class="p-4 text-xs text-base-content/40">暂无已导入订阅源，点击上方 "添加" 快速导入</div>`}
