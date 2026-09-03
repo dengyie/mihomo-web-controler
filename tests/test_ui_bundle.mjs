@@ -338,5 +338,36 @@ assert.strictEqual(subpage.style.display, 'none', 'Toolkit subpage is hidden on 
 assert.strictEqual(nativePage.style.display, '', 'Native page is restored on #/proxies');
 
 console.log('✅ Return to Native Page #/proxies restores layout passed');
+
+// 4. Test #/rules custom rules button and modal interaction
+global.location.hash = '#/rules';
+if (windowEvents.has('hashchange')) {
+  for (const fn of windowEvents.get('hashchange')) fn();
+}
+const rulesTopBtn = mockDoc.getElementById('user-rules-top-action-btn');
+assert.ok(rulesTopBtn, '#/rules top action button injected');
+
+// Trigger open modal
+rulesTopBtn.listeners.get('click')?.[0]?.();
+const rulesModal = mockDoc.getElementById('user-rules-manager-modal');
+assert.ok(rulesModal, 'User rules dialog #user-rules-manager-modal created');
+assert.strictEqual(rulesModal.open, true, 'User rules dialog is opened');
+
+const modalContent = mockDoc.getElementById('user-rules-modal-content');
+assert.ok(modalContent, '#user-rules-modal-content exists');
+assert.ok(modalContent.querySelector('#btn-go-add'), '+ 新增规则 button exists in list view');
+
+// Switch to add mode
+modalContent.querySelector('#btn-go-add').listeners.get('click')?.[0]?.();
+assert.ok(modalContent.querySelector('#modal-rule-payload'), 'Payload input exists in add mode');
+assert.ok(modalContent.querySelector('#modal-rule-type'), 'Type select exists in add mode');
+assert.ok(modalContent.querySelector('#modal-rule-target'), 'Target select exists in add mode');
+assert.ok(modalContent.querySelector('#btn-submit-add'), 'Submit button exists in add mode');
+
+// Cancel and back to list
+modalContent.querySelector('#btn-cancel-add').listeners.get('click')?.[0]?.();
+assert.ok(modalContent.querySelector('#btn-go-add'), 'Returned to list view after cancel');
+
+console.log('✅ #/rules Modal CRUD Controls (Add/List/Submit) verification passed');
 console.log('🎉 All Subpage Architecture tests passed successfully!');
 process.exit(0);

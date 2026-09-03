@@ -87,7 +87,15 @@
   // 用户自定义规则状态
   let userRulesState = {
     rules: [],
+    targets: [],
     loading: false,
+    submitting: false,
+    viewMode: 'list', // 'list' | 'add'
+    form: {
+      type: 'DOMAIN-SUFFIX',
+      payload: '',
+      target: '',
+    },
   };
 
   // 死节点清理过滤状态
@@ -1160,6 +1168,7 @@
   }
 
   function openUserRulesModal() {
+    userRulesState.viewMode = 'list';
     let modal = document.getElementById('user-rules-manager-modal');
     if (!modal) {
       modal = document.createElement('dialog');
@@ -1194,54 +1203,259 @@
   async function fetchUserRules() {
     const container = document.getElementById('user-rules-modal-content');
     if (!container) return;
+    userRulesState.loading = true;
+    if (userRulesState.viewMode !== 'add') {
+      renderUserRulesModal();
+    }
+
     try {
       const resp = await fetch(`${getApiBase()}/user-rules`, { headers: getAuthHeaders() });
       const json = await resp.json();
-      if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
-      userRulesState.rules = json.data?.rules || [];
-      renderUserRulesModal();
+      if (!resp.ok || (json.status && json.status !== 'ok')) {
+        throw new Error(json.error || `HTTP ${resp.status}`);
+      }
+      userRulesState.rules = json.rules || json.data?.rules || [];
+      userRulesState.targets = json.available_targets || json.targets || json.data?.available_targets || json.data?.targets || ['DIRECT', 'REJECT', 'GLOBAL'];
+      if (!userRulesState.form.target && userRulesState.targets.length > 0) {
+        userRulesState.form.target = userRulesState.targets.includes('PROXY') ? 'PROXY' : userRulesState.targets[0];
+      }
     } catch (e) {
-      container.innerHTML = `<div class="alert alert-error text-xs gap-1.5">${nativeIcon('exclamation-triangle', 'h-3.5 w-3.5')} 加载失败: ${escapeHtml(e.message)}</div>`;
+      showToast(`获取规则失败: ${e.message}`, 'error');
+    } finally {
+      userRulesState.loading = false;
+      if (userRulesState.viewMode !== 'add') {
+        renderUserRulesModal();
+      }
+    }
+  }
+
+  async function saveUserRule() {
+    if (userRulesState.submitting) return;
+    const { type, payload, target } = userRulesState.form;
+    const cleanPayload = (payload || '').trim();
+    if (!cleanPayload) {
+      showToast('请填写匹配目标 (Payload)', 'warning');
+      return;
+    }
+    if (!target) {
+      showToast('请选择目标策略组', 'warning');
+      return;
+    }
+
+    userRulesState.submitting = true;
+    renderUserRulesModal();
+
+    try {
+      showToast('正在写入权威源并执行语法校验与热重载...', 'info');
+      const resp = await fetch(`${getApiBase()}/user-rules`, {
+        method: 'POST',
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: type || 'DOMAIN-SUFFIX',
+          payload: cleanPayload,
+          target: target,
+          enabled: true,
+        }),
+      });
+      const json = await resp.json();
+      if (!resp.ok || !json.success) {
+        throw new Error(json.error || (json.reconcile && json.reconcile.error) || `HTTP ${resp.status}`);
+      }
+      showToast('✅ 规则保存成功并已热重载生效！', 'success');
+      userRulesState.form.payload = '';
+      userRulesState.viewMode = 'list';
+      await fetchUserRules();
+    } catch (err) {
+      showToast(`保存失败: ${err.message}`, 'error');
+    } finally {
+      userRulesState.submitting = false;
+      renderUserRulesModal();
+    }
+  }
+
+  async function deleteUserRule(ruleId, payload) {
+    if (userRulesState.submitting) return;
+    if (!confirm(`确定要删除规则 "${payload}" 吗？删除后将自动热重载。`)) return;
+    userRulesState.submitting = true;
+    renderUserRulesModal();
+
+    try {
+      const resp = await fetch(`${getApiBase()}/user-rules/${encodeURIComponent(ruleId)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      const json = await resp.json();
+      if (!resp.ok || !json.success) {
+        throw new Error(json.error || `HTTP ${resp.status}`);
+      }
+      showToast('规则已删除并热重载生效', 'success');
+      await fetchUserRules();
+    } catch (err) {
+      showToast(`删除失败: ${err.message}`, 'error');
+    } finally {
+      userRulesState.submitting = false;
+      renderUserRulesModal();
     }
   }
 
   function renderUserRulesModal() {
     const container = document.getElementById('user-rules-modal-content');
     if (!container) return;
+
+    if (userRulesState.viewMode === 'add') {
+      const ruleTypes = [
+        'DOMAIN-SUFFIX',
+        'DOMAIN',
+        'DOMAIN-KEYWORD',
+        'IP-CIDR',
+        'IP-CIDR6',
+        'GEOSITE',
+        'GEOIP',
+      ];
+      const targets = userRulesState.targets.length > 0 ? userRulesState.targets : ['DIRECT', 'REJECT', 'GLOBAL'];
+      const targetOptions = targets
+        .map((t) => `<option value="${escapeHtml(t)}" ${userRulesState.form.target === t ? 'selected' : ''}>${escapeHtml(t)}</option>`)
+        .join('');
+
+      const isSubmitting = userRulesState.submitting;
+      const previewText = `Mihomo: ${userRulesState.form.type || 'DOMAIN-SUFFIX'},${userRulesState.form.payload.trim() || '...'},${userRulesState.form.target || 'DIRECT'}`;
+
+      container.innerHTML = `
+        <div class="flex items-center justify-between pb-2 border-b border-base-300">
+          <div class="flex items-center gap-2">
+            <button class="btn btn-ghost btn-xs btn-circle" id="btn-back-to-list" ${isSubmitting ? 'disabled' : ''}>
+              ${nativeIcon('arrow-left', 'h-4 w-4')}
+            </button>
+            <span class="font-bold text-sm">新增自定义规则</span>
+          </div>
+          <span class="text-xs text-base-content/40 font-mono">${escapeHtml(activeBackendUuid.replace('backend-', '').replace('-default', ''))}</span>
+        </div>
+        <div class="flex flex-col gap-3.5 pt-1">
+          <div>
+            <label class="block text-xs font-medium mb-1 opacity-70">规则类型 (Type)</label>
+            <select id="modal-rule-type" class="select select-bordered select-sm w-full font-mono" ${isSubmitting ? 'disabled' : ''}>
+              ${ruleTypes.map((t) => `<option value="${t}" ${userRulesState.form.type === t ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium mb-1 opacity-70">匹配目标 (Payload)</label>
+            <input id="modal-rule-payload" class="input input-bordered input-sm w-full font-mono" placeholder="如: example.com 或 1.1.1.1/32" value="${escapeHtml(userRulesState.form.payload)}" ${isSubmitting ? 'disabled' : ''} />
+          </div>
+          <div>
+            <label class="block text-xs font-medium mb-1 opacity-70">分流策略 (Target)</label>
+            <select id="modal-rule-target" class="select select-bordered select-sm w-full" ${isSubmitting ? 'disabled' : ''}>
+              ${targetOptions}
+            </select>
+          </div>
+          <div class="p-2.5 bg-base-200/60 rounded-lg text-xs font-mono break-all text-base-content/80" id="modal-rule-preview">
+            ${escapeHtml(previewText)}
+          </div>
+          <div class="flex justify-end gap-2 mt-2">
+            <button class="btn btn-sm btn-ghost" id="btn-cancel-add" ${isSubmitting ? 'disabled' : ''}>取消</button>
+            <button class="btn btn-sm btn-primary" id="btn-submit-add" ${isSubmitting ? 'disabled' : ''}>
+              ${isSubmitting ? '<span class="loading loading-spinner loading-xs"></span> 保存中...' : '保存并生效'}
+            </button>
+          </div>
+        </div>
+      `;
+
+      const typeEl = container.querySelector('#modal-rule-type');
+      const payloadEl = container.querySelector('#modal-rule-payload');
+      const targetEl = container.querySelector('#modal-rule-target');
+      const previewEl = container.querySelector('#modal-rule-preview');
+
+      const updatePreview = () => {
+        userRulesState.form.type = typeEl?.value || 'DOMAIN-SUFFIX';
+        userRulesState.form.payload = payloadEl?.value || '';
+        userRulesState.form.target = targetEl?.value || '';
+        if (previewEl) {
+          previewEl.textContent = `Mihomo: ${userRulesState.form.type},${userRulesState.form.payload.trim() || '...'},${userRulesState.form.target || 'DIRECT'}`;
+        }
+      };
+
+      typeEl?.addEventListener('change', updatePreview);
+      payloadEl?.addEventListener('input', updatePreview);
+      targetEl?.addEventListener('change', updatePreview);
+
+      container.querySelector('#btn-back-to-list')?.addEventListener('click', () => {
+        userRulesState.viewMode = 'list';
+        renderUserRulesModal();
+      });
+      container.querySelector('#btn-cancel-add')?.addEventListener('click', () => {
+        userRulesState.viewMode = 'list';
+        renderUserRulesModal();
+      });
+      container.querySelector('#btn-submit-add')?.addEventListener('click', () => {
+        updatePreview();
+        saveUserRule();
+      });
+      return;
+    }
+
+    // List view
     const rules = userRulesState.rules || [];
+    const isBusy = userRulesState.loading || userRulesState.submitting;
+
     container.innerHTML = `
-      <div class="flex justify-between items-center text-xs">
-        <span class="text-base-content/60">当前已生效自定义规则数: <b class="font-mono text-base-content">${rules.length}</b></span>
-        <button class="btn btn-xs btn-outline gap-1" id="btn-refresh-user-rules">
-          ${nativeIcon('arrow-path', 'h-3 w-3')} 刷新
-        </button>
+      <div class="flex justify-between items-center text-xs pb-1">
+        <div class="flex items-center gap-2">
+          <span class="text-base-content/60">当前生效规则: <b class="font-mono text-base-content">${rules.length}</b></span>
+          ${userRulesState.loading ? '<span class="loading loading-spinner loading-xs"></span>' : ''}
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-xs btn-primary gap-1" id="btn-go-add" ${isBusy ? 'disabled' : ''}>
+            ${nativeIcon('plus', 'h-3 w-3')} 新增规则
+          </button>
+          <button class="btn btn-xs btn-outline gap-1" id="btn-refresh-user-rules" ${isBusy ? 'disabled' : ''}>
+            ${nativeIcon('arrow-path', 'h-3 w-3')} 刷新
+          </button>
+        </div>
       </div>
-      <div class="overflow-x-auto max-h-64 border border-base-300 rounded-lg custom-scrollbar">
+      <div class="overflow-x-auto max-h-72 border border-base-300 rounded-lg custom-scrollbar">
         <table class="table table-xs w-full">
           <thead>
             <tr class="bg-base-200 text-base-content/70">
               <th>类型</th>
               <th>匹配载荷</th>
               <th>目标策略组</th>
-              <th>备注说明</th>
+              <th>更新时间</th>
+              <th class="text-right">操作</th>
             </tr>
           </thead>
           <tbody>
             ${rules.length === 0 ? `
-              <tr><td colspan="4" class="text-center py-6 text-base-content/40">暂无自定义规则</td></tr>
+              <tr><td colspan="5" class="text-center py-6 text-base-content/40">暂无自定义规则，点击右上角 “+ 新增规则” 添加</td></tr>
             ` : rules.map(r => `
               <tr class="hover:bg-base-200/40 font-mono">
                 <td class="font-bold text-primary">${escapeHtml(r.type)}</td>
-                <td>${escapeHtml(r.payload)}</td>
+                <td class="max-w-[200px] truncate" title="${escapeHtml(r.payload)}">${escapeHtml(r.payload)}</td>
                 <td><span class="badge badge-sm badge-ghost">${escapeHtml(r.target)}</span></td>
-                <td class="text-base-content/50 font-sans">${escapeHtml(r.comment || '-')}</td>
+                <td class="text-base-content/50 font-sans text-[11px]">${escapeHtml(r.updatedAt ? r.updatedAt.split('T')[0] : 'UI')}</td>
+                <td class="text-right font-sans">
+                  <button class="btn btn-ghost btn-xs text-error p-1 hover:bg-error/10 btn-del-user-rule" data-id="${escapeHtml(r.id)}" data-payload="${escapeHtml(r.payload)}" title="删除规则" ${isBusy ? 'disabled' : ''}>
+                    ${nativeIcon('trash', 'h-3.5 w-3.5')}
+                  </button>
+                </td>
               </tr>
             `).join('')}
           </tbody>
         </table>
       </div>
     `;
+
+    container.querySelector('#btn-go-add')?.addEventListener('click', () => {
+      userRulesState.viewMode = 'add';
+      renderUserRulesModal();
+    });
     container.querySelector('#btn-refresh-user-rules')?.addEventListener('click', fetchUserRules);
+    container.querySelectorAll('.btn-del-user-rule').forEach(btn => {
+      btn.addEventListener('click', () => {
+        deleteUserRule(btn.dataset.id, btn.dataset.payload);
+      });
+    });
   }
 
   // ==========================================
