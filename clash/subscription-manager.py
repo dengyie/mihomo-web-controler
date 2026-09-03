@@ -1108,7 +1108,6 @@ class SubscriptionEngine:
         newly_dead: List[str] = []
 
         def probe_node(name: str) -> Tuple[str, Optional[int]]:
-            t0 = time.perf_counter()
             q_name = urllib.parse.quote(name, safe="")
             q_url = urllib.parse.quote(test_url, safe="")
             delay_url = f"{controller_api}/proxies/{q_name}/delay?timeout={timeout_ms}&url={q_url}"

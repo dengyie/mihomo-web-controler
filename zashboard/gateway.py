@@ -671,12 +671,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             dry_run = dry_run_str in ('true', '1', 'yes')
 
             try:
-                engine = get_subscription_engine()
-            except SubscriptionEngineLoadError as e:
+                sm = get_sub_manager()
+            except SubManagerLoadError as e:
                 self.send_json(500, {'status': 'error', 'error': f'Subscription engine load error: {e}'})
+                return
+            if not sm:
+                self.send_json(500, {'status': 'error', 'error': 'Subscription manager module is unavailable'})
                 return
 
             try:
+                engine = sm.SubscriptionEngine()
                 res = engine.prune_dead_nodes(
                     batch_size=batch_size,
                     max_workers=max_workers,
