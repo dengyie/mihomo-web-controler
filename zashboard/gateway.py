@@ -679,7 +679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             def probe(src):
                 start_t = time.perf_counter()
                 try:
-                    parsed_info = _probe_egress_source(src, timeout=3.5, use_proxy=use_proxy, proxy_port=proxy_port)
+                    parsed_info = _probe_egress_source(src, timeout=6.5, use_proxy=use_proxy, proxy_port=proxy_port)
                     latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
                     if parsed_info and parsed_info.get('ip'):
                         return {
@@ -694,7 +694,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             results = []
             futures = [DIAGNOSTICS_EXECUTOR.submit(probe, src) for src in sources]
             try:
-                for future in concurrent.futures.as_completed(futures, timeout=3.5):
+                for future in concurrent.futures.as_completed(futures, timeout=6.5):
                     res = future.result()
                     if res:
                         results.append(res)
