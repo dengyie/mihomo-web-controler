@@ -105,6 +105,14 @@
     error: null,
   };
 
+  // Clash 客户端订阅导出（给 Clash Verge 用）
+  let clientSubState = {
+    loading: false,
+    urlPath: '',
+    error: null,
+    copied: false,
+  };
+
   // ==========================================
   // 凭证与后端识别
   // ==========================================
@@ -209,6 +217,7 @@
         renderToolkitSubpage();
         fetchEgressIp(true);
         fetchSubscriptions();
+        fetchClientSubInfo();
       }
     }
   }
@@ -292,6 +301,55 @@
         subscriptionState.loading = false;
         renderSubsSection();
       }
+    }
+  }
+
+  async function fetchClientSubInfo() {
+    clientSubState.loading = true;
+    renderSubsSection();
+    try {
+      const resp = await fetch(`${getApiBase()}/client-sub`, {
+        headers: getAuthHeaders(),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json();
+      if (json.status === 'ok' && json.data?.url_path) {
+        clientSubState.urlPath = json.data.url_path;
+        clientSubState.error = null;
+      } else {
+        clientSubState.error = json.error || '无法读取导出链接';
+      }
+    } catch (err) {
+      clientSubState.error = err.message || '无法读取导出链接';
+    } finally {
+      clientSubState.loading = false;
+      renderSubsSection();
+    }
+  }
+
+  function clientSubAbsoluteUrl() {
+    if (!clientSubState.urlPath) return '';
+    try {
+      return new URL(clientSubState.urlPath, window.location.origin).toString();
+    } catch {
+      return clientSubState.urlPath;
+    }
+  }
+
+  async function copyClientSubUrl() {
+    const url = clientSubAbsoluteUrl();
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      clientSubState.copied = true;
+      showToast('已复制 Clash 客户端订阅链接', 'success');
+      renderSubsSection();
+      setTimeout(() => {
+        clientSubState.copied = false;
+        renderSubsSection();
+      }, 1800);
+    } catch (err) {
+      showToast('复制失败: ' + (err.message || 'clipboard'), 'error');
     }
   }
 
@@ -505,6 +563,7 @@
         mainContainer.appendChild(toolkitPage);
         fetchEgressIp(false);
         fetchSubscriptions();
+        fetchClientSubInfo();
         renderToolkitSubpage();
       } else if (!lastRouteWasToolkit || toolkitPage.style.display === 'none') {
         toolkitPage.style.display = 'flex';
@@ -916,6 +975,7 @@
     const isPruning = pruneState.loading;
     const lastPrune = pruneState.lastResult;
 
+    const clientUrl = clientSubAbsoluteUrl();
     slot.innerHTML = `
       <div class="settings-section-label">订阅与节点聚合</div>
       <div class="settings-grid">
@@ -930,6 +990,15 @@
             </button>
             <button class="btn btn-sm" id="btn-show-add-sub" ${isAnyBusy || isPruning ? 'disabled' : ''}>${nativeIcon('plus', 'h-4 w-4')} 添加</button>
           </div>
+        </div>
+        <div class="setting-item p-4">
+          <div class="setting-item-label flex min-w-0 flex-col gap-0.5">
+            <span>Clash 客户端订阅</span>
+            <span class="truncate font-mono text-xs text-base-content/40">${escapeHtml(clientUrl || (clientSubState.loading ? '读取中…' : (clientSubState.error || '打开本页后自动生成')))}</span>
+          </div>
+          <button class="btn btn-sm btn-outline" id="btn-copy-client-sub" ${clientUrl ? '' : 'disabled'}>
+            ${nativeIcon(clientSubState.copied ? 'check' : 'link', 'h-4 w-4')} ${clientSubState.copied ? '已复制' : '复制链接'}
+          </button>
         </div>
         ${lastPrune ? `
           <div class="p-3 bg-base-200/50 rounded-box text-xs flex items-center justify-between gap-2">
@@ -953,6 +1022,9 @@
 
     slot.querySelector('#btn-prune-dead-nodes')?.addEventListener('click', () => {
       triggerPruneDeadNodes();
+    });
+    slot.querySelector('#btn-copy-client-sub')?.addEventListener('click', () => {
+      copyClientSubUrl();
     });
 
     slot.querySelector('#btn-show-add-sub')?.addEventListener('click', () => {

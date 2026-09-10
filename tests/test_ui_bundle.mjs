@@ -271,6 +271,19 @@ global.fetch = async (url) => {
       }),
     };
   }
+  if (url.includes('/client-sub')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: 'ok',
+        data: {
+          path: '/sub/clash',
+          url_path: '/sub/clash?token=ui-bundle-token',
+        },
+      }),
+    };
+  }
   if (url.includes('/subscriptions')) {
     return {
       ok: true,
@@ -324,6 +337,8 @@ assert.ok(subpage.innerHTML.includes('data-slot="icon"'), 'Subpage uses native H
 assert.ok(subpage.querySelector('#toolkit-egress-slot'), 'Slot #toolkit-egress-slot exists');
 assert.ok(subpage.querySelector('#toolkit-subs-slot'), 'Slot #toolkit-subs-slot exists');
 assert.ok(subpage.querySelector('#toolkit-sim-slot'), 'Slot #toolkit-sim-slot exists');
+assert.ok(subpage.querySelector('#btn-copy-client-sub'), 'Clash client subscription copy button exists');
+assert.ok(subpage.innerHTML.includes('Clash 客户端订阅'), 'Client subscription label rendered');
 assert.strictEqual(bundleCode.includes('uiIcon('), false, 'uiIcon is completely removed');
 assert.strictEqual(bundleCode.includes('const ICONS ='), false, 'ICONS dictionary is completely removed');
 

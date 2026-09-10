@@ -17,6 +17,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import sys
 import tempfile
@@ -37,6 +38,60 @@ RAW_CACHE_DIR = ROOT / 'subscriptions/raw'
 MERGED_OUTPUT_FILE = ROOT / 'airports/airport-merged-sub.yaml'
 LOCK_FILE = ROOT / 'subscriptions/.subscription.lock'
 DISABLED_NODES_FILE = ROOT / 'airports/disabled-nodes.txt'
+CLIENT_EXPORT_TOKEN_FILE = ROOT / 'subscriptions/client-export.token'
+LOCAL_NODES_FILE = ROOT / 'airports/local-nodes.yaml'
+
+# Client Clash export: DNS bootstrap that avoids TUN + fake-ip deadlock.
+CLIENT_DNS = {
+    'enable': True,
+    'ipv6': False,
+    'enhanced-mode': 'fake-ip',
+    'fake-ip-range': '198.18.0.1/16',
+    'default-nameserver': ['223.5.5.5', '119.29.29.29', '1.1.1.1'],
+    'proxy-server-nameserver': [
+        'https://doh.pub/dns-query',
+        'https://dns.alidns.com/dns-query',
+    ],
+    'nameserver': [
+        'https://223.5.5.5/dns-query',
+        'https://doh.pub/dns-query',
+    ],
+    'fake-ip-filter': [
+        '*.lan',
+        '*.local',
+        '*.localdomain',
+        'localhost',
+        '+.argotunnel.com',
+        '+.cloudflare.com',
+        '+.mangoqwq.com',
+        '+.mangoq.ccwu.cc',
+        '+.cc.cd',
+    ],
+}
+
+CLIENT_DIRECT_RULES = [
+    'DOMAIN-SUFFIX,argotunnel.com,DIRECT',
+    'DOMAIN-SUFFIX,cloudflare.com,DIRECT',
+    'DOMAIN-SUFFIX,mangoqwq.com,DIRECT',
+    'DOMAIN-SUFFIX,kryptex.network,DIRECT',
+    'DOMAIN-SUFFIX,kryptex.com,DIRECT',
+    'IP-CIDR,104.208.65.233/32,DIRECT,no-resolve',
+    'IP-CIDR,35.212.179.13/32,DIRECT,no-resolve',
+    'IP-CIDR,51.83.6.5/32,DIRECT,no-resolve',
+    'IP-CIDR,45.202.199.205/32,DIRECT,no-resolve',
+    'GEOIP,LAN,DIRECT,no-resolve',
+    'MATCH,PROXY',
+]
+
+# Clash Verge TUN (gvisor + fake-ip). Verge still needs enable_tun_mode in
+# verge.yaml; this block is what the kernel actually loads from the profile.
+CLIENT_TUN = {
+    'enable': True,
+    'stack': 'gvisor',
+    'dns-hijack': ['any:53'],
+    'auto-route': True,
+    'auto-detect-interface': True,
+}
 
 # Default regex pattern to filter out announcement / non-functional nodes
 DEFAULT_EXCLUDE_FILTER = r'(剩余流量|更新日期|官网|套餐|重置|到期|过期|公告|流量|时间|群|客服|traffic|expire|reset|website|notice)'
@@ -901,8 +956,13 @@ class SubscriptionEngine:
         raw_content: Optional[str] = None,
         exclude_filter: Optional[str] = None,
         enabled: bool = True,
+        skip_merge: bool = False,
     ) -> Dict[str, Any]:
-        """Add a new subscription source to metadata and process nodes."""
+        """Add a new subscription source to metadata and process nodes.
+
+        ``skip_merge=True`` keeps the source visible in the panel but out of
+        ``airport-merged-sub.yaml`` / live VPS ``config.yaml``.
+        """
         with SubscriptionLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
@@ -927,6 +987,7 @@ class SubscriptionEngine:
                 'updatedAt': now_iso,
                 'node_count': 0,
                 'last_error': None,
+                'skip_merge': bool(skip_merge),
             }
 
             content = ""
@@ -1183,8 +1244,13 @@ class SubscriptionEngine:
             enabled=True,
         )
 
-    def reconcile_merged(self, fetch_remote: bool = False) -> Dict[str, Any]:
-        """Aggregate all enabled subscriptions and write airports/airport-merged-sub.yaml."""
+    def reconcile_merged(self, fetch_remote: bool = False, update_targets: bool = True) -> Dict[str, Any]:
+        """Aggregate all enabled subscriptions and write airports/airport-merged-sub.yaml.
+
+        ``update_targets=False`` writes the merged airport file only. Client
+        export must use that mode so an empty panel subscription list cannot
+        wipe ``🌐 订阅导入`` out of the live VPS ``config.yaml``.
+        """
         data = self.load_meta()
         subs = data.get('subscriptions', [])
 
@@ -1193,6 +1259,10 @@ class SubscriptionEngine:
 
         for sub in subs:
             if not sub.get('enabled', True):
+                continue
+            # Panel-visible local inventory (airports/local-nodes.yaml) must not
+            # be prefix-merged into VPS config.yaml / airport-merged-sub.yaml.
+            if sub.get('skip_merge'):
                 continue
 
             sub_id = sub.get('id', '')
@@ -1246,15 +1316,22 @@ class SubscriptionEngine:
         rendered = fast_yaml_dump(merged_doc)
         safe_atomic_write(self.merged_output_file, rendered)
 
-        # Load denylist to filter from target configs
-        disabled_set = load_disabled_nodes(self.disabled_file)
-
-        # Reconcile target configs (config.yaml, config.mac-merged.yaml) if they exist
         targets_updated = []
-        for target in (self.root / 'config.mac-merged.yaml', self.root / 'config.yaml'):
-            if target.exists():
-                if reconcile_target_config(target, all_proxies, disabled_nodes=disabled_set):
-                    targets_updated.append(str(target))
+        mergeable_subs = [
+            s for s in subs
+            if s.get('enabled', True) and not s.get('skip_merge')
+        ]
+        # An empty panel must never wipe live VPS groups (keeper / airport
+        # files still own config.yaml). Only rewrite targets when there is at
+        # least one mergeable subscription.
+        if update_targets and not mergeable_subs:
+            update_targets = False
+        if update_targets:
+            disabled_set = load_disabled_nodes(self.disabled_file)
+            for target in (self.root / 'config.mac-merged.yaml', self.root / 'config.yaml'):
+                if target.exists():
+                    if reconcile_target_config(target, all_proxies, disabled_nodes=disabled_set):
+                        targets_updated.append(str(target))
 
         return {
             'success': True,
@@ -1262,6 +1339,110 @@ class SubscriptionEngine:
             'output_file': str(self.merged_output_file),
             'targets_updated': targets_updated,
         }
+
+    def get_or_create_client_token(self) -> str:
+        """Return the Clash client-export token, creating one if missing.
+
+        Env ``CLIENT_SUB_TOKEN`` always wins so production can pin a secret
+        without rewriting the token file.
+        """
+        env_token = (os.environ.get('CLIENT_SUB_TOKEN') or '').strip()
+        if env_token:
+            return env_token
+        path = self.root / 'subscriptions/client-export.token'
+        if path.exists():
+            existing = path.read_text(encoding='utf-8', errors='ignore').strip()
+            if existing:
+                return existing
+        token = secrets.token_urlsafe(24)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        safe_atomic_write(path, token + '\n', mode=0o600)
+        return token
+
+    def _load_local_nodes(self) -> List[Dict[str, Any]]:
+        path = self.root / 'airports/local-nodes.yaml'
+        if not path.exists():
+            return []
+        try:
+            data = fast_yaml_load(path.read_text(encoding='utf-8', errors='ignore')) or {}
+        except Exception:
+            return []
+        if isinstance(data, dict):
+            proxies = data.get('proxies') or []
+        elif isinstance(data, list):
+            proxies = data
+        else:
+            return []
+        return [p for p in proxies if isinstance(p, dict) and p.get('name') and p.get('type') and p.get('server')]
+
+    def render_client_clash_config(self, fetch_remote: bool = False) -> str:
+        """Render a complete Clash Meta client YAML for Mac/Windows Verge.
+
+        Combines enabled subscription proxies + optional ``airports/local-nodes.yaml``,
+        strips the denylist, and injects DNS bootstrap + DIRECT rules that keep
+        TUN + fake-ip from hijacking LAN / Cloudflare Tunnel / self-hosted inbounds.
+        Never rewrites VPS ``config.yaml`` (``update_targets=False``).
+        """
+        self.reconcile_merged(fetch_remote=fetch_remote, update_targets=False)
+        disabled = load_disabled_nodes(self.disabled_file)
+
+        proxies: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        merged_path = self.merged_output_file
+        if merged_path.exists():
+            try:
+                merged = fast_yaml_load(merged_path.read_text(encoding='utf-8', errors='ignore')) or {}
+                for node in (merged.get('proxies') or []) if isinstance(merged, dict) else []:
+                    if not isinstance(node, dict):
+                        continue
+                    name = str(node.get('name') or '').strip()
+                    if not name or name in disabled or name in seen:
+                        continue
+                    seen.add(name)
+                    proxies.append(node)
+            except Exception:
+                pass
+
+        for node in self._load_local_nodes():
+            name = str(node.get('name') or '').strip()
+            if not name or name in disabled or name in seen:
+                continue
+            seen.add(name)
+            proxies.append(node)
+
+        names = [str(p['name']) for p in proxies]
+        auto_members = names or ['DIRECT']
+        select_members = ['AUTO'] + names + ['DIRECT']
+
+        doc: Dict[str, Any] = {
+            'mixed-port': 7897,
+            'allow-lan': True,
+            'mode': 'rule',
+            'log-level': 'info',
+            'ipv6': False,
+            'unified-delay': True,
+            'tun': dict(CLIENT_TUN),
+            'dns': dict(CLIENT_DNS),
+            'proxies': proxies,
+            'proxy-groups': [
+                {
+                    'name': 'PROXY',
+                    'type': 'select',
+                    'proxies': select_members,
+                },
+                {
+                    'name': 'AUTO',
+                    'type': 'url-test',
+                    'url': 'http://www.gstatic.com/generate_204',
+                    'interval': 300,
+                    'tolerance': 50,
+                    'proxies': auto_members,
+                },
+            ],
+            'rules': list(CLIENT_DIRECT_RULES),
+        }
+        return fast_yaml_dump(doc)
 
 
 # ---------------------------------------------------------
@@ -1278,6 +1459,7 @@ def main():
     parser.add_argument('--reconcile', action='store_true', help='Reconcile and regenerate merged airport config')
     parser.add_argument('--fetch', action='store_true', help='Force re-fetching remote subscriptions during reconcile')
     parser.add_argument('--prune-dead', action='store_true', help='Test and prune dead nodes into disabled denylist')
+    parser.add_argument('--export-client', action='store_true', help='Print a complete Clash Meta client YAML to stdout')
     parser.add_argument('--batch-size', type=int, default=15, help='Batch size for health checks (default: 15)')
     parser.add_argument('--max-workers', type=int, default=5, help='Max concurrent workers for health checks (default: 5)')
     parser.add_argument('--dry-run', action='store_true', help='Perform health checks without applying filter to configs')
@@ -1325,6 +1507,10 @@ def main():
         res = engine.reconcile_merged(fetch_remote=args.fetch)
         print(json.dumps(res, ensure_ascii=False, indent=2))
         sys.exit(0 if res.get('success') else 1)
+
+    if args.export_client:
+        print(engine.render_client_clash_config(fetch_remote=args.fetch), end='')
+        sys.exit(0)
 
     parser.print_help()
 

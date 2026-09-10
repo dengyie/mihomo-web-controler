@@ -657,3 +657,88 @@ def test_prune_dead_nodes_and_disabled_filtering(temp_clash_root, monkeypatch):
     assert "GVPS-TUIC-googlevps" in groups_map["PROXY"]["proxies"]
 
 
+def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    ss_alive = "ss://YWVzLTEyOC1nY206eA==@1.2.3.4:8388#Airport-Alive"
+    ss_dead = "ss://YWVzLTEyOC1nY206eA==@5.6.7.8:8388#Airport-Dead"
+    res = engine.import_raw_nodes(name="Airport", raw_text=f"{ss_alive}\n{ss_dead}")
+    assert res["success"] is True
+    (temp_clash_root / "airports" / "disabled-nodes.txt").write_text(
+        "[Airport] Airport-Dead\n", encoding="utf-8"
+    )
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {
+                        "name": "HK-Reality",
+                        "type": "vless",
+                        "server": "hk.example.com",
+                        "port": 443,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sentinel = temp_clash_root / "config.yaml"
+    sentinel.write_text("proxies: []\nproxy-groups:\n- name: PROXY\n  type: select\n  proxies: [DIRECT]\n", encoding="utf-8")
+    before = sentinel.read_text(encoding="utf-8")
+
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    doc = yaml.safe_load(yaml_text)
+    names = [p["name"] for p in doc["proxies"]]
+    assert "[Airport] Airport-Alive" in names
+    assert "HK-Reality" in names
+    assert "[Airport] Airport-Dead" not in names
+    assert doc["dns"]["enhanced-mode"] == "fake-ip"
+    assert "https://doh.pub/dns-query" in doc["dns"]["proxy-server-nameserver"]
+    assert "+.argotunnel.com" in doc["dns"]["fake-ip-filter"]
+    assert "DOMAIN-SUFFIX,mangoqwq.com,DIRECT" in doc["rules"]
+    assert doc["rules"][-1] == "MATCH,PROXY"
+    assert doc["tun"]["enable"] is True
+    assert doc["tun"]["stack"] == "gvisor"
+    assert "any:53" in doc["tun"]["dns-hijack"]
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups["PROXY"]["type"] == "select"
+    assert groups["AUTO"]["type"] == "url-test"
+    assert "[Airport] Airport-Dead" not in groups["PROXY"]["proxies"]
+    assert "HK-Reality" in groups["PROXY"]["proxies"]
+    assert sentinel.read_text(encoding="utf-8") == before
+
+
+def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    ss = "ss://YWVzLTEyOC1nY206eA==@1.2.3.4:8388#Skip-Me"
+    res = engine.add_subscription(
+        name="LocalLive",
+        sub_type="raw",
+        raw_content=ss,
+        skip_merge=True,
+    )
+    assert res["success"] is True
+    merged = yaml.safe_load((temp_clash_root / "airports" / "airport-merged-sub.yaml").read_text())
+    names = [p["name"] for p in (merged.get("proxies") or [])]
+    assert names == []
+    listed = engine.list_subscriptions()
+    assert listed[0]["skip_merge"] is True
+    assert listed[0]["node_count"] == 1
+    sentinel = temp_clash_root / "config.yaml"
+    sentinel.write_text(
+        "proxies:\n- name: Keep-Me\n  type: ss\n  server: 1.1.1.1\n  port: 1\n"
+        "proxy-groups:\n- name: PROXY\n  type: select\n  proxies: [Keep-Me]\n",
+        encoding="utf-8",
+    )
+    before = sentinel.read_text(encoding="utf-8")
+    engine.reconcile_merged(fetch_remote=False, update_targets=True)
+    assert sentinel.read_text(encoding="utf-8") == before
+
+
+def test_get_or_create_client_token_env_wins(temp_clash_root, monkeypatch):
+    monkeypatch.setenv("CLIENT_SUB_TOKEN", "pinned-from-env")
+    engine = SubscriptionEngine(root=temp_clash_root)
+    assert engine.get_or_create_client_token() == "pinned-from-env"
+
+

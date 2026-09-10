@@ -652,6 +652,94 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed for path {rel_path}'})
 
+    def _client_sub_token_ok(self, engine) -> bool:
+        """Clash Verge cannot send Authorization; authenticate ?token= against
+        the dedicated client-export token (or PANEL_PASSWORD as a fallback).
+        Empty tokens never match.
+        """
+        token = parse_qs(urlsplit(self.path).query).get('token', [''])[0]
+        if not token:
+            return False
+        expected = ''
+        try:
+            expected = engine.get_or_create_client_token()
+        except Exception:
+            expected = ''
+        if expected and secrets.compare_digest(token, expected):
+            return True
+        panel = panel_password()
+        return bool(panel) and secrets.compare_digest(token, panel)
+
+    def _handle_client_sub(self, method: str):
+        """Public Clash client YAML: GET /sub/clash?token=...
+
+        Outside /panel/api so Clash Verge can fetch without a Bearer header.
+        Never fetch remotes on this path (use cached merge) so a client poll
+        cannot turn into an outbound SSRF amplifier.
+        """
+        if method not in ('GET', 'HEAD'):
+            self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed'})
+            return
+        try:
+            sm = get_sub_manager()
+        except SubManagerLoadError as e:
+            self.send_json(500, {'status': 'error', 'error': f'Subscription manager module failed to load: {e}'})
+            return
+        if not sm:
+            self.send_json(500, {'status': 'error', 'error': 'Subscription manager module is unavailable'})
+            return
+        engine = sm.SubscriptionEngine()
+        if not self._client_sub_token_ok(engine):
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.send_header('WWW-Authenticate', 'Bearer')
+            self.end_headers()
+            return
+        try:
+            yaml_text = engine.render_client_clash_config(fetch_remote=False)
+        except Exception as e:
+            self.send_json(500, {'status': 'error', 'error': str(e)})
+            return
+        body = yaml_text.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/yaml; charset=utf-8')
+        self.send_header('Content-Disposition', 'attachment; filename="clash-client.yaml"')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if method != 'HEAD':
+            self.wfile.write(body)
+
+    def _handle_client_sub_info(self, method: str, rel_path: str):
+        """Authenticated helper: return the Clash client subscription URL/token."""
+        if not self._is_authenticated():
+            self.send_response(401)
+            self.send_header('Content-Length', '0')
+            self.send_header('WWW-Authenticate', 'Bearer')
+            self.end_headers()
+            return
+        if method != 'GET':
+            self.send_json(405, {'status': 'error', 'error': f'Method {method} not allowed'})
+            return
+        try:
+            sm = get_sub_manager()
+        except SubManagerLoadError as e:
+            self.send_json(500, {'status': 'error', 'error': f'Subscription manager module failed to load: {e}'})
+            return
+        if not sm:
+            self.send_json(500, {'status': 'error', 'error': 'Subscription manager module is unavailable'})
+            return
+        engine = sm.SubscriptionEngine()
+        token = engine.get_or_create_client_token()
+        self.send_json(200, {
+            'status': 'ok',
+            'data': {
+                'path': '/sub/clash',
+                'token': token,
+                'url_path': f'/sub/clash?token={token}',
+            },
+        })
+
     def _handle_diagnostics(self, method: str, rel_path: str):
         if not self._is_authenticated():
             self.send_response(401)
@@ -1237,6 +1325,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
+
+        if path in ('/sub/clash', '/sub/clash.yaml'):
+            return self._handle_client_sub(method)
+
+        if rel_path.startswith('/panel/api/client-sub'):
+            return self._handle_client_sub_info(method, rel_path)
 
         if rel_path.startswith('/panel/api/subscriptions'):
             return self._handle_subscriptions(method, rel_path)

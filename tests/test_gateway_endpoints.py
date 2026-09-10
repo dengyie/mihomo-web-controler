@@ -280,6 +280,48 @@ class GatewayEndpointsTests(unittest.TestCase):
         self.gw.Handler._dispatch(h_bad.handler, 'GET')
         self.assertEqual(h_bad.response_status, 401)
 
+    def test_client_clash_export_requires_token(self):
+        h = _FakeRequestHarness(self.gw, 'GET', '/sub/clash', auth_token=None)
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 401)
+
+        h_bad = _FakeRequestHarness(self.gw, 'GET', '/sub/clash?token=wrong', auth_token=None)
+        self.gw.Handler._dispatch(h_bad.handler, 'GET')
+        self.assertEqual(h_bad.response_status, 401)
+
+    def test_client_clash_export_yaml(self):
+        os.environ['CLIENT_SUB_TOKEN'] = 'client-export-token'
+        sm = self.gw.get_sub_manager()
+        engine = sm.SubscriptionEngine(root=self.clash_dir)
+        imported = engine.import_raw_nodes(
+            name='Export',
+            raw_text='ss://YWVzLTEyOC1nY206cA==@9.9.9.9:8388#Export-Node',
+        )
+        self.assertTrue(imported.get('success'))
+
+        h = _FakeRequestHarness(self.gw, 'GET', '/sub/clash?token=client-export-token', auth_token=None)
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 200)
+        self.assertIn('yaml', h.response_headers.get('Content-Type', ''))
+        body = h.handler.wfile.getvalue().decode('utf-8')
+        doc = yaml.safe_load(body)
+        self.assertEqual(doc['proxies'][0]['name'], '[Export] Export-Node')
+        self.assertEqual(doc['dns']['enhanced-mode'], 'fake-ip')
+        self.assertEqual(doc['rules'][-1], 'MATCH,PROXY')
+        self.assertTrue(doc['tun']['enable'])
+        self.assertEqual(doc['tun']['stack'], 'gvisor')
+
+        info = _FakeRequestHarness(self.gw, 'GET', '/panel/api/client-sub', auth_token=self.token)
+        self.gw.Handler._dispatch(info.handler, 'GET')
+        self.assertEqual(info.response_status, 200)
+        info_json = info.get_json()
+        self.assertEqual(info_json['data']['token'], 'client-export-token')
+        self.assertEqual(info_json['data']['path'], '/sub/clash')
+
+        unauth_info = _FakeRequestHarness(self.gw, 'GET', '/panel/api/client-sub', auth_token=None)
+        self.gw.Handler._dispatch(unauth_info.handler, 'GET')
+        self.assertEqual(unauth_info.response_status, 401)
+
     # -------------------------------------------------------------
     # Rule Simulation API Tests
     # -------------------------------------------------------------
