@@ -16,6 +16,7 @@ cache.db
 *.lock
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Local backups
 *.bak*
@@ -26,3 +27,6 @@ __pycache__/
 .vscode/
 .idea/
 node_modules/
+
+# Local agent / debug scratch (keep scripts/ and tests/ bundles)
+/*.mjs

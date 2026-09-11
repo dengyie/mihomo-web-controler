@@ -82,6 +82,12 @@ class AuthFailClosedTests(unittest.TestCase):
         finally:
             Path(p).unlink(missing_ok=True)
 
+    def test_consteq_rejects_unequal_length_without_raising(self):
+        self.assertFalse(self.gw.consteq('abc', 'abcd'))
+        self.assertFalse(self.gw.consteq('', 'x'))
+        self.assertFalse(self.gw.consteq('s3cr3t', 'nope'))
+        self.assertTrue(self.gw.consteq('s3cr3t', 's3cr3t'))
+
     def test_empty_token_never_matches_real_secret(self):
         # Even with a real secret, an empty query token must be denied.
         import tempfile

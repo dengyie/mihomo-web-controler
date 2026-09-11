@@ -25,8 +25,8 @@ if (process.env.CI !== 'true') {
 
 const code = readFileSync(src, 'utf8');
 // Sanity: nothing that ships to browsers may contain the real panel password.
-// (The historical hardcoded secret was 2625451001; the placeholder
-// __PANEL_PASSWORD__ is replaced server-side at serve time, never at build.)
+// The historical hardcoded secret was 2625451001. index.html must not contain
+// a __PANEL_PASSWORD__ placeholder either — the gateway no longer injects it.
 const PANEL_SECRET = '2625451001';
 const shipped = {
   'zashboard/src/user-rules-ui.js': code,
@@ -37,6 +37,9 @@ const shipped = {
 for (const [name, text] of Object.entries(shipped)) {
   if (text.includes(PANEL_SECRET)) {
     throw new Error(`Refusing to build: ${name} contains hardcoded panel password literal.`);
+  }
+  if (name.endsWith('index.html') && text.includes('__PANEL_PASSWORD__')) {
+    throw new Error(`Refusing to build: ${name} still contains __PANEL_PASSWORD__ placeholder.`);
   }
 }
 

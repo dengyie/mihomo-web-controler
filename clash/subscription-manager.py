@@ -13,12 +13,17 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hashlib
+import http.client
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
 import socket
+import ssl
+import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -40,6 +45,14 @@ LOCK_FILE = ROOT / 'subscriptions/.subscription.lock'
 DISABLED_NODES_FILE = ROOT / 'airports/disabled-nodes.txt'
 CLIENT_EXPORT_TOKEN_FILE = ROOT / 'subscriptions/client-export.token'
 LOCAL_NODES_FILE = ROOT / 'airports/local-nodes.yaml'
+CLIENT_EXPORT_FILE = ROOT / 'airports/mango-clash.yaml'
+CLIENT_EXPORT_META_FILE = ROOT / 'airports/mango-clash.meta.json'
+CLIENT_EXPORT_TOKEN_MODE = 0o640
+CLIENT_EXPORT_RENDER_REV = '1'
+CLIENT_BUILTIN_OUTBOUNDS = frozenset({
+    'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
+})
+_LOG = logging.getLogger('mango-clash-export')
 
 # Client Clash export: DNS bootstrap that avoids TUN + fake-ip deadlock.
 CLIENT_DNS = {
@@ -80,8 +93,313 @@ CLIENT_DIRECT_RULES = [
     'IP-CIDR,51.83.6.5/32,DIRECT,no-resolve',
     'IP-CIDR,45.202.199.205/32,DIRECT,no-resolve',
     'GEOIP,LAN,DIRECT,no-resolve',
-    'MATCH,PROXY',
 ]
+
+GOOGLE_GROUP = '🎯Google'
+CLIENT_GOOGLE_RULES = [
+    'DOMAIN,accounts.google.com,' + GOOGLE_GROUP,
+    'DOMAIN,accounts.youtube.com,' + GOOGLE_GROUP,
+    'DOMAIN,oauth2.googleapis.com,' + GOOGLE_GROUP,
+    'DOMAIN,www.googleapis.com,' + GOOGLE_GROUP,
+    'DOMAIN,apis.google.com,' + GOOGLE_GROUP,
+    'DOMAIN,ssl.gstatic.com,' + GOOGLE_GROUP,
+    'DOMAIN,www.gstatic.com,' + GOOGLE_GROUP,
+    'DOMAIN,lh3.googleusercontent.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,google.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,google.com.hk,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,googleapis.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,gstatic.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,googleusercontent.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,ggpht.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,googlevideo.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,youtube.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,youtu.be,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,gvt0.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,gvt1.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,gvt2.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,gvt3.com,' + GOOGLE_GROUP,
+    'DOMAIN-SUFFIX,gmail.com,' + GOOGLE_GROUP,
+]
+CLIENT_FINAL_RULES = ['MATCH,PROXY']
+_US_GOOGLE_NAME = re.compile(r'美国_BGP|北美洲】美国\d+原生')
+LOCAL_GROUP_VPS = 'vps-import'
+LOCAL_GROUP_GOOGLE = 'google'
+LOCAL_GROUP_GROK = 'grok'
+
+
+def _is_us_google_node(name: str) -> bool:
+    """Fallback US-Google name filter when local-nodes.yaml has no groups.google."""
+    n = str(name or '').strip()
+    if not n:
+        return False
+    low = n.lower()
+    if 'azure' in low or 'googlevps' in low or n.startswith('GVPS') or '香港' in n:
+        return False
+    return _US_GOOGLE_NAME.search(n) is not None
+
+
+def normalize_simple_groups(raw: Any) -> Dict[str, List[str]]:
+    """Keep only name lists. Clash url-test/select fields are ignored."""
+    groups: Dict[str, List[str]] = {}
+    if not isinstance(raw, dict):
+        return groups
+    for key, val in raw.items():
+        label = str(key or '').strip()
+        if not label:
+            continue
+        items = val
+        if isinstance(val, dict):
+            items = val.get('proxies')
+        if not isinstance(items, list):
+            continue
+        names: List[str] = []
+        seen: Set[str] = set()
+        for item in items:
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(item.get('name') or '').strip()
+            else:
+                continue
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        groups[label] = names
+    return groups
+
+
+def prune_simple_groups(groups: Dict[str, List[str]], kept_names: Set[str]) -> Dict[str, List[str]]:
+    pruned: Dict[str, List[str]] = {}
+    for label, names in groups.items():
+        pruned[label] = [n for n in names if n in kept_names]
+    return pruned
+
+
+def resolve_simple_group(
+    groups: Dict[str, List[str]],
+    label: str,
+    available: Set[str],
+    fallback: Optional[List[str]] = None,
+) -> List[str]:
+    if label in groups:
+        return [n for n in groups[label] if n in available]
+    if fallback is not None:
+        return [n for n in fallback if n in available]
+    return []
+
+
+def drop_unresolved_dialer_proxies(proxies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop chain nodes whose dialer-proxy is not in this same proxy list.
+
+    Clash Meta refuses the whole YAML when a remaining proxy points at a
+    missing dialer. Walk until stable so A→B→missing drops both A and B.
+    """
+    kept = [p for p in proxies if isinstance(p, dict)]
+    builtin = {'DIRECT', 'REJECT', 'COMPATIBLE'}
+    while True:
+        names = {
+            str(p.get('name') or '').strip()
+            for p in kept
+            if str(p.get('name') or '').strip()
+        }
+        nxt: List[Dict[str, Any]] = []
+        dropped = False
+        for proxy in kept:
+            dialer = str(proxy.get('dialer-proxy') or proxy.get('dialer_proxy') or '').strip()
+            if dialer and dialer not in names and dialer not in builtin:
+                dropped = True
+                continue
+            nxt.append(proxy)
+        kept = nxt
+        if not dropped:
+            return kept
+
+
+class ClientExportInvalid(ValueError):
+    """Rendered client YAML failed validation and no last-good file exists."""
+
+    def __init__(self, errors: List[str]):
+        self.errors = [str(e) for e in errors if str(e).strip()]
+        preview = '; '.join(self.errors[:8]) or 'unknown validation error'
+        super().__init__(f'client yaml invalid: {preview}')
+
+
+def _kernel_test_client_yaml(text: str, kernel_bin: Path, workdir: Path) -> Optional[str]:
+    """Run ``mihomo -t`` on a candidate. None means pass or binary missing."""
+    if not kernel_bin.exists():
+        return None
+    parent = workdir / 'airports' if (workdir / 'airports').is_dir() else workdir
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='mango-clash-test-', suffix='.yaml', dir=str(parent))
+    try:
+        os.write(fd, text.encode('utf-8'))
+        os.close(fd)
+        fd = -1
+        try:
+            os.chmod(name, 0o600)
+        except OSError:
+            pass
+        res = subprocess.run(
+            [str(kernel_bin), '-t', '-d', str(workdir), '-f', name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        if res.returncode == 0:
+            return None
+        msg = (res.stderr or res.stdout or f'exit {res.returncode}').strip()
+        return f'mihomo -t: {msg[:500]}'
+    except Exception as e:
+        return f'mihomo -t: {e}'
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.remove(name)
+        except OSError:
+            pass
+
+
+def _rule_outbound(rule: Any) -> Optional[str]:
+    if not isinstance(rule, str):
+        return None
+    parts = [p.strip() for p in rule.split(',') if p.strip()]
+    if len(parts) < 2:
+        return None
+    if parts[-1].lower() == 'no-resolve' and len(parts) >= 3:
+        return parts[-2]
+    return parts[-1]
+
+
+def validate_client_clash_yaml(
+    text: str,
+    *,
+    kernel_bin: Optional[Path] = None,
+    workdir: Optional[Path] = None,
+) -> List[str]:
+    """Structural (and optional kernel) checks. Empty list means publishable.
+
+    Catches the class of errors Clash Verge treats as a failed profile test:
+    dangling dialer-proxy, missing group members, duplicate names, empty
+    url-test pools. A failed check must not replace last-good bytes.
+    """
+    errors: List[str] = []
+    try:
+        data = yaml.safe_load(text) if text and text.strip() else None
+    except Exception as e:
+        return [f'yaml-parse: {e}']
+    if not isinstance(data, dict):
+        return ['yaml-parse: not a mapping']
+
+    proxies = data.get('proxies')
+    if not isinstance(proxies, list) or not proxies:
+        errors.append('proxies: empty')
+        proxies = proxies if isinstance(proxies, list) else []
+
+    names: List[str] = []
+    seen: Set[str] = set()
+    for i, proxy in enumerate(proxies):
+        if not isinstance(proxy, dict):
+            errors.append(f'proxies[{i}]: not a mapping')
+            continue
+        name = str(proxy.get('name') or '').strip()
+        if not name:
+            errors.append(f'proxies[{i}]: missing name')
+            continue
+        if name in seen:
+            errors.append(f'proxies: duplicate name {name}')
+        if name in CLIENT_BUILTIN_OUTBOUNDS:
+            errors.append(f'proxy {name}: collides with builtin')
+        seen.add(name)
+        names.append(name)
+        if not str(proxy.get('type') or '').strip():
+            errors.append(f'proxy {name}: missing type')
+
+    name_set = set(names)
+    for proxy in proxies:
+        if not isinstance(proxy, dict):
+            continue
+        name = str(proxy.get('name') or '').strip() or '?'
+        dialer = str(proxy.get('dialer-proxy') or proxy.get('dialer_proxy') or '').strip()
+        if dialer and dialer not in name_set and dialer not in CLIENT_BUILTIN_OUTBOUNDS:
+            errors.append(f'proxy {name}: dialer-proxy {dialer} not found')
+
+    groups = data.get('proxy-groups') or []
+    if not isinstance(groups, list):
+        errors.append('proxy-groups: not a list')
+        groups = []
+    group_names: Set[str] = set()
+    for i, group in enumerate(groups):
+        if not isinstance(group, dict):
+            errors.append(f'proxy-groups[{i}]: not a mapping')
+            continue
+        gname = str(group.get('name') or '').strip()
+        if not gname:
+            errors.append(f'proxy-groups[{i}]: missing name')
+            continue
+        if gname in group_names:
+            errors.append(f'duplicate group {gname}')
+        if gname in CLIENT_BUILTIN_OUTBOUNDS:
+            errors.append(f'group {gname}: collides with builtin')
+        if gname in name_set:
+            errors.append(f'group {gname}: collides with proxy')
+        group_names.add(gname)
+    allowed = name_set | group_names | CLIENT_BUILTIN_OUTBOUNDS
+    for i, group in enumerate(groups):
+        if not isinstance(group, dict):
+            continue
+        gname = str(group.get('name') or '').strip() or f'groups[{i}]'
+        members = group.get('proxies') or []
+        if not isinstance(members, list) or not members:
+            errors.append(f'group {gname}: empty proxies')
+            continue
+        for member in members:
+            label = str(member or '').strip()
+            if not label:
+                errors.append(f'group {gname}: empty member')
+            elif label not in allowed:
+                errors.append(f'group {gname}: member {label} not found')
+
+    rules = data.get('rules')
+    if rules is not None:
+        if not isinstance(rules, list) or not rules:
+            errors.append('rules: empty')
+        else:
+            for i, rule in enumerate(rules):
+                target = _rule_outbound(rule)
+                if not target:
+                    errors.append(f'rules[{i}]: missing outbound')
+                elif target not in allowed:
+                    errors.append(f'rules[{i}]: outbound {target} not found')
+
+    if errors:
+        return errors
+    if kernel_bin is not None:
+        kernel_err = _kernel_test_client_yaml(text, kernel_bin, workdir or Path('.'))
+        if kernel_err:
+            errors.append(kernel_err)
+    return errors
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return 'missing'
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _export_warn(msg: str) -> None:
+    _LOG.warning(msg)
+    print(msg, flush=True)
+
 
 # Clash Verge TUN (gvisor + fake-ip). Verge still needs enable_tun_mode in
 # verge.yaml; this block is what the kernel actually loads from the profile.
@@ -92,6 +410,24 @@ CLIENT_TUN = {
     'auto-route': True,
     'auto-detect-interface': True,
 }
+
+FETCH_MAX_BYTES = 8 * 1024 * 1024
+NODE_PROBE_TIMEOUT_SEC = 1.5
+NODE_PROBE_MAX_WORKERS = 16
+NODE_PROBE_MAX_CANDIDATES = 200
+# UDP-only outbound cannot be TCP-probed; keep them when expanding the node file.
+# Parser emits type=hysteria2 for both hysteria2:// and hy2://; hy2 stays as a belt.
+UDP_NODE_TYPES = frozenset({'hysteria', 'hysteria2', 'hy2', 'tuic', 'wireguard'})
+PROBE_REASON_SSRF = 'ssrf-skip'
+
+
+def client_allow_lan() -> bool:
+    """Client export binds mixed-port on LAN only when CLIENT_ALLOW_LAN=1.
+
+    Default false: TUN already covers the local machine; LAN listen is a
+    separate exposure and must not ship on by default.
+    """
+    return os.environ.get('CLIENT_ALLOW_LAN', '').strip().lower() in ('1', 'true', 'yes')
 
 # Default regex pattern to filter out announcement / non-functional nodes
 DEFAULT_EXCLUDE_FILTER = r'(剩余流量|更新日期|官网|套餐|重置|到期|过期|公告|流量|时间|群|客服|traffic|expire|reset|website|notice)'
@@ -124,15 +460,25 @@ SUB_GROUP_NAME = '🌐 订阅导入'
 GENERIC_GROUP_NAMES = {'PROXY', '🚀 节点选择', '🎯 全球直连', '节点选择', 'Proxy', 'proxy'}
 
 
+def _ip_is_blocked(ip_obj: ipaddress._BaseAddress) -> bool:
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_reserved
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+    )
+
+
 def is_safe_public_url(url: str, allow_private: bool = False) -> Tuple[bool, str]:
-    """Validate that a URL is a safe public HTTP/HTTPS endpoint to prevent SSRF attacks.
-    
-    Checks scheme (only http/https), resolves hostname to IP addresses, and ensures
-    no IP resolves to private, loopback, link-local, reserved, multicast, or unspecified ranges.
-    Can be bypassed if allow_private is True or ALLOW_PRIVATE_SUBSCRIPTIONS=1 is set in env.
+    """Validate that a URL is a safe HTTP/HTTPS endpoint to prevent SSRF attacks.
+
+    Always requires http/https. Resolves the hostname and rejects private,
+    loopback, link-local, reserved, multicast, and unspecified addresses unless
+    ``allow_private`` is True or ``ALLOW_PRIVATE_SUBSCRIPTIONS=1``.
     """
-    if allow_private or os.environ.get('ALLOW_PRIVATE_SUBSCRIPTIONS') == '1':
-        return True, ""
+    allow_private = allow_private or os.environ.get('ALLOW_PRIVATE_SUBSCRIPTIONS') == '1'
 
     if not url or not isinstance(url, str):
         return False, "Invalid or empty URL"
@@ -150,29 +496,24 @@ def is_safe_public_url(url: str, allow_private: bool = False) -> Tuple[bool, str
     if not hostname:
         return False, "URL does not contain a valid hostname"
 
-    # Check if hostname is an IP literal
     try:
         ip_obj = ipaddress.ip_address(hostname.strip('[]'))
-        if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local 
-                or ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
+        if not allow_private and _ip_is_blocked(ip_obj):
             return False, "Disallowed internal/private IP or hostname"
         return True, ""
     except ValueError:
-        # Not an IP literal, resolve domain
         pass
 
     try:
-        # Resolve hostname using getaddrinfo
         addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
         if not addr_infos:
             return False, f"Could not resolve hostname '{hostname}'"
-        
+
         for info in addr_infos:
             sockaddr = info[4]
             ip_str = sockaddr[0]
             ip_obj = ipaddress.ip_address(ip_str)
-            if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local 
-                    or ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
+            if not allow_private and _ip_is_blocked(ip_obj):
                 return False, "Disallowed internal/private IP or hostname"
     except socket.gaierror as e:
         return False, f"DNS resolution failed for hostname '{hostname}': {e}"
@@ -180,6 +521,95 @@ def is_safe_public_url(url: str, allow_private: bool = False) -> Tuple[bool, str
         return False, f"SSRF check error: {e}"
 
     return True, ""
+
+
+def _pin_resolved_ip(hostname: str, allow_private: bool) -> str:
+    """Return one resolved address for hostname after the SSRF filter.
+
+    Connecting to this IP (with Host/SNI still set to the original hostname)
+    closes the DNS-rebinding window between check and connect.
+    """
+    try:
+        ip_obj = ipaddress.ip_address(hostname.strip('[]'))
+        if not allow_private and _ip_is_blocked(ip_obj):
+            raise ValueError("Disallowed internal/private IP or hostname")
+        return hostname.strip('[]')
+    except ValueError:
+        if hostname.startswith('[') and hostname.endswith(']'):
+            pass
+        else:
+            try:
+                ipaddress.ip_address(hostname)
+            except ValueError:
+                pass
+
+    addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    if not addr_infos:
+        raise ValueError(f"Could not resolve hostname '{hostname}'")
+    for info in addr_infos:
+        ip_str = info[4][0]
+        ip_obj = ipaddress.ip_address(ip_str)
+        if allow_private or not _ip_is_blocked(ip_obj):
+            return ip_str
+    raise ValueError("Disallowed internal/private IP or hostname")
+
+
+def _read_capped(resp, limit: int) -> bytes:
+    buf = bytearray()
+    while True:
+        chunk = resp.read(min(65536, max(1, limit - len(buf) + 1)))
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > limit:
+            raise ValueError(f"Response exceeds size limit ({limit} bytes)")
+    return bytes(buf)
+
+
+def _http_get_pinned(url: str, timeout: int, user_agent: str) -> Tuple[int, dict, bytes, str]:
+    """GET url, connecting to a pinned IP. Does not follow redirects."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = (parsed.scheme or '').lower()
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL does not contain a valid hostname")
+    port = parsed.port or (443 if scheme == 'https' else 80)
+    path = parsed.path or '/'
+    if parsed.query:
+        path = path + '?' + parsed.query
+    allow_private = os.environ.get('ALLOW_PRIVATE_SUBSCRIPTIONS') == '1'
+    pinned_ip = _pin_resolved_ip(hostname, allow_private=allow_private)
+
+    headers = {
+        'User-Agent': user_agent,
+        'Host': hostname if parsed.port is None else f'{hostname}:{parsed.port}',
+        'Accept': '*/*',
+        'Connection': 'close',
+    }
+
+    if scheme == 'https':
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(pinned_ip, port, timeout=timeout, context=ctx)
+
+        def _connect_with_sni():
+            sock = socket.create_connection((pinned_ip, port), timeout)
+            conn.sock = ctx.wrap_socket(sock, server_hostname=hostname)
+
+        conn.connect = _connect_with_sni  # type: ignore[assignment]
+    else:
+        conn = http.client.HTTPConnection(pinned_ip, port, timeout=timeout)
+
+    try:
+        conn.request('GET', path, headers=headers)
+        resp = conn.getresponse()
+        header_map = {k.lower(): v for k, v in resp.getheaders()}
+        body = _read_capped(resp, FETCH_MAX_BYTES)
+        return resp.status, header_map, body, pinned_ip
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------
@@ -894,6 +1324,183 @@ def apply_node_name_prefix(nodes: List[Dict[str, Any]], sub_name: str) -> List[D
     return renamed_nodes
 
 
+def _node_server_port(node: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
+    server = str(node.get('server') or '').strip()
+    if not server:
+        return None, None
+    try:
+        port = int(node.get('port') or 0)
+    except (TypeError, ValueError):
+        return server, None
+    if port <= 0 or port > 65535:
+        return server, None
+    return server, port
+
+
+def _node_endpoint_key(node: Dict[str, Any]) -> Tuple[str, str, Optional[int]]:
+    """Stable identity for prune writeback: name + server + port."""
+    name = str(node.get('name') or '').strip()
+    server, port = _node_server_port(node)
+    return name, str(server or ''), port
+
+
+def _cap_probe_candidates(
+    nodes: List[Dict[str, Any]],
+    limit: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    if limit is None:
+        limit = NODE_PROBE_MAX_CANDIDATES
+    try:
+        cap = int(limit)
+    except (TypeError, ValueError):
+        cap = NODE_PROBE_MAX_CANDIDATES
+    if cap <= 0:
+        cap = NODE_PROBE_MAX_CANDIDATES
+    if len(nodes) <= cap:
+        return nodes, False
+    return nodes[:cap], True
+
+
+def probe_node_tcp(node: Dict[str, Any], timeout: float = NODE_PROBE_TIMEOUT_SEC) -> Tuple[bool, str]:
+    """TCP connect probe for a Clash proxy dict. UDP-only types are kept.
+
+    This is file-pool liveness only: no Mihomo delay API, no terminal Clash.
+    Private / loopback / link-local / reserved destinations are not contacted
+    (same SSRF policy as subscription fetches).
+    """
+    ntype = str(node.get('type') or '').strip().lower()
+    if ntype in UDP_NODE_TYPES:
+        return True, 'udp-skip'
+    server, port = _node_server_port(node)
+    if not server or not port:
+        return False, 'missing-server-port'
+    allow_private = os.environ.get('ALLOW_PRIVATE_SUBSCRIPTIONS') == '1'
+    try:
+        pinned = _pin_resolved_ip(server, allow_private=allow_private)
+    except ValueError as e:
+        err = str(e)[:120]
+        if 'Disallowed' in err:
+            return False, PROBE_REASON_SSRF
+        return False, err
+    except OSError as e:
+        return False, str(e)[:120]
+    try:
+        with socket.create_connection((pinned, port), timeout=timeout):
+            return True, 'tcp-ok'
+    except OSError as e:
+        return False, str(e)[:120]
+
+
+def probe_nodes(
+    nodes: List[Dict[str, Any]],
+    timeout: float = NODE_PROBE_TIMEOUT_SEC,
+    max_workers: int = 8,
+    keep_ssrf: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split nodes into alive / dead via TCP probe. UDP-only types stay alive.
+
+    ``keep_ssrf=True`` (prune) retains destinations the SSRF filter refused,
+    so a LAN node already in the file is not deleted. Inject keeps the default
+    and will not add those destinations.
+    """
+    import concurrent.futures
+
+    alive: List[Dict[str, Any]] = []
+    dead: List[Dict[str, Any]] = []
+    if not nodes:
+        return alive, dead
+
+    def _one(node: Dict[str, Any]) -> Tuple[Dict[str, Any], bool, str]:
+        ok, reason = probe_node_tcp(node, timeout=timeout)
+        return node, ok, reason
+
+    try:
+        worker_cap = int(max_workers)
+    except (TypeError, ValueError):
+        worker_cap = 8
+    workers = max(1, min(worker_cap, NODE_PROBE_MAX_WORKERS, len(nodes)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for node, ok, reason in pool.map(_one, nodes):
+            tagged = dict(node)
+            tagged['_probe'] = reason
+            if ok:
+                alive.append(tagged)
+            elif keep_ssrf and reason == PROBE_REASON_SSRF:
+                alive.append(tagged)
+            else:
+                dead.append(tagged)
+    return alive, dead
+
+
+def load_local_nodes_document(path: Path) -> Dict[str, Any]:
+    empty = {'proxies': [], 'groups': {}, 'had_groups': False}
+    if not path.exists():
+        return empty
+    try:
+        data = fast_yaml_load(path.read_text(encoding='utf-8', errors='ignore')) or {}
+    except Exception:
+        return empty
+    if isinstance(data, list):
+        proxies = data
+        groups: Dict[str, List[str]] = {}
+        had_groups = False
+    elif isinstance(data, dict):
+        proxies = data.get('proxies') or []
+        groups = normalize_simple_groups(data.get('groups'))
+        had_groups = 'groups' in data
+    else:
+        return empty
+    nodes = [
+        p for p in proxies
+        if isinstance(p, dict) and p.get('name') and p.get('type') and p.get('server')
+    ]
+    kept = {str(p.get('name')) for p in nodes}
+    return {
+        'proxies': nodes,
+        'groups': prune_simple_groups(groups, kept),
+        'had_groups': had_groups,
+    }
+
+
+def load_local_nodes_file(path: Path) -> List[Dict[str, Any]]:
+    return load_local_nodes_document(path)['proxies']
+
+
+def load_local_node_groups(path: Path) -> Dict[str, List[str]]:
+    return load_local_nodes_document(path)['groups']
+
+
+def save_local_nodes_file(
+    path: Path,
+    nodes: List[Dict[str, Any]],
+    groups: Optional[Dict[str, List[str]]] = None,
+) -> None:
+    cleaned: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        item = {k: v for k, v in node.items() if not str(k).startswith('_')}
+        name = str(item.get('name') or '').strip()
+        if not name or name in seen:
+            continue
+        if not item.get('type') or not item.get('server'):
+            continue
+        seen.add(name)
+        cleaned.append(item)
+    existing = load_local_nodes_document(path)
+    if groups is None:
+        groups = existing['groups']
+    else:
+        groups = normalize_simple_groups(groups)
+    pruned = prune_simple_groups(groups, seen)
+    doc: Dict[str, Any] = {'proxies': cleaned}
+    if pruned or existing['had_groups']:
+        doc['groups'] = pruned
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_atomic_write(path, fast_yaml_dump(doc))
+
+
 # ---------------------------------------------------------
 # Metadata & Subscription Engine Management
 # ---------------------------------------------------------
@@ -903,6 +1510,9 @@ class SubscriptionEngine:
 
     def __init__(self, root: Optional[Path] = None):
         self.root, self.meta_file, self.raw_cache_dir, self.merged_output_file, self.lock_file, self.disabled_file = get_paths(root)
+        self.local_nodes_file = self.root / 'airports' / 'local-nodes.yaml'
+        self.client_export_file = self.root / 'airports' / 'mango-clash.yaml'
+        self.client_export_meta_file = self.root / 'airports' / 'mango-clash.meta.json'
 
     def _get_cache_path(self, sub_id: str) -> Path:
         return self.raw_cache_dir / f"{sub_id}.raw"
@@ -935,18 +1545,23 @@ class SubscriptionEngine:
         safe_atomic_write(self.meta_file, content)
 
     def fetch_url(self, url: str, timeout: int = 15) -> str:
-        """Fetch subscription content from HTTP/HTTPS URL with proper User-Agent and SSRF protection."""
+        """Fetch subscription content with SSRF protection, no redirects, pinned IP, body cap."""
         safe, err = is_safe_public_url(url)
         if not safe:
             raise ValueError(f"SSRF check failed: {err}")
 
-        req = urllib.request.Request(
+        status, headers, raw, _pinned = _http_get_pinned(
             url,
-            headers={'User-Agent': 'ClashMeta/v1.18.0 mihomo/1.18.0'}
+            timeout=timeout,
+            user_agent='ClashMeta/v1.18.0 mihomo/1.18.0',
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            return raw.decode('utf-8', errors='ignore')
+        if 300 <= status < 400:
+            raise ValueError(
+                f"HTTP {status} redirect refused (subscription fetches do not follow redirects)"
+            )
+        if status != 200:
+            raise ValueError(f"HTTP {status} fetching subscription")
+        return raw.decode('utf-8', errors='ignore')
 
     def add_subscription(
         self,
@@ -957,12 +1572,28 @@ class SubscriptionEngine:
         exclude_filter: Optional[str] = None,
         enabled: bool = True,
         skip_merge: bool = False,
+        inject_local: bool = False,
+        probe: bool = True,
     ) -> Dict[str, Any]:
         """Add a new subscription source to metadata and process nodes.
 
         ``skip_merge=True`` keeps the source visible in the panel but out of
         ``airport-merged-sub.yaml`` / live VPS ``config.yaml``.
+        ``inject_local=True`` TCP-probes parsed nodes and merges the alive
+        ones into ``airports/local-nodes.yaml`` (the client node file).
+        URL fetch and TCP probe run outside the subscription lock.
         """
+        content = ""
+        fetch_error: Optional[str] = None
+        if sub_type == 'raw' or raw_content:
+            content = raw_content or ''
+        elif url:
+            try:
+                content = self.fetch_url(url)
+            except Exception as e:
+                fetch_error = f"Fetch failed: {e}"
+
+        pending_inject: Optional[List[Dict[str, Any]]] = None
         with SubscriptionLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
@@ -986,36 +1617,55 @@ class SubscriptionEngine:
                 'createdAt': now_iso,
                 'updatedAt': now_iso,
                 'node_count': 0,
-                'last_error': None,
+                'last_error': fetch_error,
                 'skip_merge': bool(skip_merge),
             }
 
-            content = ""
             if sub_type == 'raw' or raw_content:
                 sub_record['raw_content'] = raw_content or ''
-                content = raw_content or ''
-                self.save_cached_content(sub_id, content)
-            elif url:
-                try:
-                    content = self.fetch_url(url)
-                    self.save_cached_content(sub_id, content)
-                except Exception as e:
-                    sub_record['last_error'] = f"Fetch failed: {e}"
-
             if content:
+                self.save_cached_content(sub_id, content)
                 try:
                     nodes = parse_subscription_content(content)
                     filtered = filter_nodes(nodes, sub_record.get('exclude_filter'))
                     sub_record['node_count'] = len(filtered)
+                    if inject_local and filtered:
+                        pending_inject = apply_node_name_prefix(filtered, name)
                 except Exception as e:
                     sub_record['last_error'] = f"Parse failed: {e}"
 
             subs.append(sub_record)
             data['subscriptions'] = subs
             self.save_meta(data)
-
             self.reconcile_merged()
-            return {'success': True, 'subscription': sub_record}
+
+        inject_result: Optional[Dict[str, Any]] = None
+        if pending_inject:
+            inject_result = self._inject_alive_into_local_nodes(
+                pending_inject,
+                probe=probe,
+            )
+            with SubscriptionLock(self.lock_file):
+                data = self.load_meta()
+                for sub in data.get('subscriptions', []):
+                    if sub.get('id') == sub_id:
+                        sub['injected_alive'] = inject_result.get('injected', 0)
+                        sub['injected_dead'] = inject_result.get('dead', 0)
+                        sub_record = sub
+                        break
+                self.save_meta(data)
+
+        if fetch_error:
+            return {
+                'success': False,
+                'error': fetch_error,
+                'subscription': sub_record,
+            }
+
+        result: Dict[str, Any] = {'success': True, 'subscription': sub_record}
+        if inject_result is not None:
+            result['inject'] = inject_result
+        return result
 
     def update_subscription(
         self,
@@ -1026,8 +1676,16 @@ class SubscriptionEngine:
         exclude_filter: Optional[str] = None,
         enabled: Optional[bool] = None,
         refresh: bool = False,
+        inject_local: Optional[bool] = None,
+        probe: bool = True,
     ) -> Dict[str, Any]:
-        """Update subscription metadata and optionally re-fetch/parse."""
+        """Update subscription metadata and optionally re-fetch/parse.
+
+        URL fetch and TCP probe run outside the subscription lock. A skip_merge
+        (or explicit inject_local) refresh re-injects alive nodes into
+        ``airports/local-nodes.yaml``. Fetch failure is ``success: False``.
+        """
+        fetch_url_value: Optional[str] = None
         with SubscriptionLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
@@ -1048,34 +1706,96 @@ class SubscriptionEngine:
                 sub['enabled'] = enabled
 
             sub['updatedAt'] = datetime.now(timezone.utc).isoformat()
+            self.save_meta(data)
+            if not refresh:
+                self.reconcile_merged()
+                return {'success': True, 'subscription': sub}
+
+            if not (sub.get('type') == 'raw' or sub.get('raw_content')) and sub.get('url'):
+                fetch_url_value = sub.get('url')
+
+        content = ""
+        fetch_error: Optional[str] = None
+        if refresh:
+            if sub.get('type') == 'raw' or sub.get('raw_content'):
+                content = sub.get('raw_content', '') or ''
+            elif fetch_url_value:
+                try:
+                    content = self.fetch_url(fetch_url_value)
+                except Exception as e:
+                    fetch_error = f"Fetch failed: {e}"
+
+        pending_inject: Optional[List[Dict[str, Any]]] = None
+        with SubscriptionLock(self.lock_file):
+            data = self.load_meta()
+            sub = next((s for s in data.get('subscriptions', []) if s.get('id') == sub_id), None)
+            if not sub:
+                return {'success': False, 'error': f"Subscription '{sub_id}' not found"}
 
             if refresh:
-                content = ""
-                sub['last_error'] = None
-                if sub.get('type') == 'raw' or sub.get('raw_content'):
-                    content = sub.get('raw_content', '')
-                    self.save_cached_content(sub_id, content)
-                elif sub.get('url'):
-                    try:
-                        content = self.fetch_url(sub['url'])
-                        self.save_cached_content(sub_id, content)
-                    except Exception as e:
-                        sub['last_error'] = f"Fetch failed: {e}"
-
+                sub['last_error'] = fetch_error
                 if content:
+                    self.save_cached_content(sub_id, content)
                     try:
                         nodes = parse_subscription_content(content)
                         filtered = filter_nodes(nodes, sub.get('exclude_filter'))
                         sub['node_count'] = len(filtered)
+                        want_inject = (
+                            bool(inject_local)
+                            if inject_local is not None
+                            else bool(sub.get('skip_merge'))
+                        )
+                        if want_inject and filtered:
+                            pending_inject = apply_node_name_prefix(
+                                filtered, sub.get('name', sub_id)
+                            )
                     except Exception as e:
                         sub['last_error'] = f"Parse failed: {e}"
+                elif fetch_error is None and not (sub.get('type') == 'raw' or sub.get('raw_content')):
+                    if not sub.get('url'):
+                        sub['last_error'] = 'Fetch failed: missing URL'
 
+            sub['updatedAt'] = datetime.now(timezone.utc).isoformat()
             self.save_meta(data)
             self.reconcile_merged()
-            return {'success': True, 'subscription': sub}
+
+        inject_result: Optional[Dict[str, Any]] = None
+        if pending_inject:
+            inject_result = self._inject_alive_into_local_nodes(
+                pending_inject,
+                probe=probe,
+            )
+            with SubscriptionLock(self.lock_file):
+                data = self.load_meta()
+                for item in data.get('subscriptions', []):
+                    if item.get('id') == sub_id:
+                        item['injected_alive'] = inject_result.get('injected', 0)
+                        item['injected_dead'] = inject_result.get('dead', 0)
+                        sub = item
+                        break
+                self.save_meta(data)
+
+        if fetch_error:
+            result: Dict[str, Any] = {
+                'success': False,
+                'error': fetch_error,
+                'subscription': sub,
+            }
+            if inject_result is not None:
+                result['inject'] = inject_result
+            return result
+
+        result = {'success': True, 'subscription': sub}
+        if inject_result is not None:
+            result['inject'] = inject_result
+        return result
 
     def delete_subscription(self, sub_id: str) -> Dict[str, Any]:
-        """Delete a subscription by id."""
+        """Delete a subscription by id.
+
+        Does not retract names already written to ``airports/local-nodes.yaml``.
+        Node-file cleanup is prune / denylist, not subscription delete.
+        """
         with SubscriptionLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
@@ -1234,15 +1954,156 @@ class SubscriptionEngine:
         data = self.load_meta()
         return data.get('subscriptions', [])
 
-    def import_raw_nodes(self, name: str, raw_text: str, exclude_filter: Optional[str] = None) -> Dict[str, Any]:
-        """Import nodes from raw text (URIs or Base64)."""
+    def import_raw_nodes(
+        self,
+        name: str,
+        raw_text: str,
+        exclude_filter: Optional[str] = None,
+        skip_merge: bool = False,
+        inject_local: bool = False,
+        probe: bool = True,
+    ) -> Dict[str, Any]:
+        """Import nodes from raw text (URIs or Base64).
+
+        Panel HTTP import passes ``skip_merge=True`` so a paste cannot rewrite
+        live VPS ``config.yaml``. CLI/tests keep the historical mergeable default.
+        """
         return self.add_subscription(
             name=name,
             sub_type='raw',
             raw_content=raw_text,
             exclude_filter=exclude_filter,
             enabled=True,
+            skip_merge=skip_merge,
+            inject_local=inject_local,
+            probe=probe,
         )
+
+    def _inject_alive_into_local_nodes(
+        self,
+        nodes: List[Dict[str, Any]],
+        probe: bool = True,
+    ) -> Dict[str, Any]:
+        """Merge alive nodes into airports/local-nodes.yaml.
+
+        Probe I/O is outside the lock. A failed first-time TCP probe is skipped
+        and is **not** written to ``disabled-nodes.txt`` (transient network
+        must not permanently blacklist a brand-new name). Already-denylisted
+        names stay out.
+        """
+        with SubscriptionLock(self.lock_file):
+            disabled = load_disabled_nodes(self.disabled_file)
+            candidates = [
+                n for n in nodes
+                if isinstance(n, dict) and str(n.get('name') or '').strip() not in disabled
+            ]
+
+        truncated = False
+        if probe:
+            candidates, truncated = _cap_probe_candidates(candidates)
+            alive, dead = probe_nodes(candidates)
+        else:
+            alive, dead = candidates, []
+
+        with SubscriptionLock(self.lock_file):
+            disabled = load_disabled_nodes(self.disabled_file)
+            existing = load_local_nodes_file(self.local_nodes_file)
+            by_name = {str(n.get('name')): n for n in existing}
+            injected = 0
+            for node in alive:
+                name = str(node.get('name') or '').strip()
+                if not name or name in disabled:
+                    continue
+                if name not in by_name:
+                    injected += 1
+                by_name[name] = node
+            save_local_nodes_file(self.local_nodes_file, list(by_name.values()))
+
+        dead_names = [str(n.get('name') or '').strip() for n in dead if n.get('name')]
+        return {
+            'probed': len(candidates),
+            'injected': injected,
+            'alive': len(alive),
+            'dead': len(dead_names),
+            'dead_names': dead_names,
+            'local_count': len(by_name),
+            'truncated': truncated,
+            'max_candidates': NODE_PROBE_MAX_CANDIDATES,
+        }
+
+    def prune_local_node_file(
+        self,
+        timeout: float = NODE_PROBE_TIMEOUT_SEC,
+        max_workers: int = 8,
+        apply_filter: bool = True,
+    ) -> Dict[str, Any]:
+        """TCP-probe airports/local-nodes.yaml and drop dead names into the denylist.
+
+        Does not rewrite VPS ``config.yaml`` and does not talk to a terminal Clash.
+        UDP-only node types are kept. Probe I/O is outside the lock. Destinations
+        refused by the SSRF filter stay in the file (not treated as dead).
+        """
+        with SubscriptionLock(self.lock_file):
+            existing = load_local_nodes_file(self.local_nodes_file)
+            already = load_disabled_nodes(self.disabled_file)
+            to_test = [n for n in existing if str(n.get('name') or '').strip() not in already]
+
+        to_test, truncated = _cap_probe_candidates(to_test)
+        alive, dead = probe_nodes(
+            to_test,
+            timeout=timeout,
+            max_workers=max_workers,
+            keep_ssrf=True,
+        )
+        dead_keys = {_node_endpoint_key(n) for n in dead if str(n.get('name') or '').strip()}
+        newly_dead = [key[0] for key in dead_keys if key[0]]
+        skipped_replaced = 0
+        if apply_filter:
+            with SubscriptionLock(self.lock_file):
+                already = load_disabled_nodes(self.disabled_file)
+                current = load_local_nodes_file(self.local_nodes_file)
+                kept: List[Dict[str, Any]] = []
+                drop_names: List[str] = []
+                dropped_keys: Set[Tuple[str, str, Optional[int]]] = set()
+                for n in current:
+                    name = str(n.get('name') or '').strip()
+                    if name in already:
+                        continue
+                    key = _node_endpoint_key(n)
+                    if key in dead_keys:
+                        drop_names.append(name)
+                        dropped_keys.add(key)
+                        continue
+                    kept.append(n)
+                skipped_replaced = len(dead_keys - dropped_keys)
+                if drop_names:
+                    save_disabled_nodes(set(drop_names), self.disabled_file)
+                    newly_dead = drop_names
+                else:
+                    newly_dead = []
+                save_local_nodes_file(self.local_nodes_file, kept)
+        else:
+            kept = [
+                n for n in existing
+                if str(n.get('name') or '').strip() not in already
+                and _node_endpoint_key(n) not in dead_keys
+            ]
+
+        return {
+            'success': True,
+            'total_candidates': len(to_test),
+            'tested_count': len(to_test),
+            'alive_count': len(alive),
+            'dead_count': len(newly_dead),
+            'newly_dead': newly_dead,
+            'alive': [{'name': str(n.get('name')), 'delay': None} for n in alive[:20]],
+            'applied_filter': apply_filter,
+            'targets_updated': [str(self.local_nodes_file)] if apply_filter else [],
+            'local_count': len(kept) if apply_filter else len(existing),
+            'truncated': truncated,
+            'max_candidates': NODE_PROBE_MAX_CANDIDATES,
+            'skipped_replaced': skipped_replaced if apply_filter else 0,
+        }
 
     def reconcile_merged(self, fetch_remote: bool = False, update_targets: bool = True) -> Dict[str, Any]:
         """Aggregate all enabled subscriptions and write airports/airport-merged-sub.yaml.
@@ -1353,27 +2214,18 @@ class SubscriptionEngine:
         if path.exists():
             existing = path.read_text(encoding='utf-8', errors='ignore').strip()
             if existing:
+                try:
+                    os.chmod(path, CLIENT_EXPORT_TOKEN_MODE)
+                except OSError:
+                    pass
                 return existing
         token = secrets.token_urlsafe(24)
         path.parent.mkdir(parents=True, exist_ok=True)
-        safe_atomic_write(path, token + '\n', mode=0o600)
+        safe_atomic_write(path, token + '\n', mode=CLIENT_EXPORT_TOKEN_MODE)
         return token
 
     def _load_local_nodes(self) -> List[Dict[str, Any]]:
-        path = self.root / 'airports/local-nodes.yaml'
-        if not path.exists():
-            return []
-        try:
-            data = fast_yaml_load(path.read_text(encoding='utf-8', errors='ignore')) or {}
-        except Exception:
-            return []
-        if isinstance(data, dict):
-            proxies = data.get('proxies') or []
-        elif isinstance(data, list):
-            proxies = data
-        else:
-            return []
-        return [p for p in proxies if isinstance(p, dict) and p.get('name') and p.get('type') and p.get('server')]
+        return load_local_nodes_file(self.local_nodes_file)
 
     def render_client_clash_config(self, fetch_remote: bool = False) -> str:
         """Render a complete Clash Meta client YAML for Mac/Windows Verge.
@@ -1411,13 +2263,23 @@ class SubscriptionEngine:
             seen.add(name)
             proxies.append(node)
 
+        proxies = drop_unresolved_dialer_proxies(proxies)
         names = [str(p['name']) for p in proxies]
+        available = set(names)
         auto_members = names or ['DIRECT']
         select_members = ['AUTO'] + names + ['DIRECT']
+        simple_groups = load_local_node_groups(self.local_nodes_file)
+        google_fallback = [n for n in names if _is_us_google_node(n)]
+        google_members = resolve_simple_group(
+            simple_groups,
+            LOCAL_GROUP_GOOGLE,
+            available,
+            fallback=google_fallback,
+        ) or ['PROXY']
 
         doc: Dict[str, Any] = {
             'mixed-port': 7897,
-            'allow-lan': True,
+            'allow-lan': client_allow_lan(),
             'mode': 'rule',
             'log-level': 'info',
             'ipv6': False,
@@ -1439,10 +2301,156 @@ class SubscriptionEngine:
                     'tolerance': 50,
                     'proxies': auto_members,
                 },
+                {
+                    'name': GOOGLE_GROUP,
+                    'type': 'url-test',
+                    'url': 'https://accounts.google.com/',
+                    'interval': 300,
+                    'tolerance': 50,
+                    'proxies': google_members,
+                },
             ],
-            'rules': list(CLIENT_DIRECT_RULES),
+            'rules': list(CLIENT_DIRECT_RULES) + list(CLIENT_GOOGLE_RULES) + list(CLIENT_FINAL_RULES),
         }
         return fast_yaml_dump(doc)
+
+    def load_last_good_client_yaml(self) -> Optional[str]:
+        path = self.client_export_file
+        if not path.exists():
+            return None
+        try:
+            text = path.read_text(encoding='utf-8')
+        except OSError:
+            return None
+        if not text.strip():
+            return None
+        return text
+
+    def _usable_last_good(self) -> Optional[Tuple[str, str]]:
+        """Return (yaml, sha256) only if last-good still passes structure checks."""
+        last_good = self.load_last_good_client_yaml()
+        if last_good is None:
+            return None
+        errors = validate_client_clash_yaml(last_good)
+        if errors:
+            _export_warn('mango-clash last-good invalid: %s' % '; '.join(errors[:8]))
+            return None
+        return last_good, sha256_text(last_good)
+
+    def _serve_last_good(
+        self,
+        last: Tuple[str, str],
+        errors: List[str],
+    ) -> Dict[str, Any]:
+        yaml_text, digest = last
+        _export_warn('mango-clash publish rejected; serving last-good: %s' % '; '.join(errors[:8]))
+        return {
+            'ok': True,
+            'published': False,
+            'served_last_good': True,
+            'yaml': yaml_text,
+            'sha256': digest,
+            'errors': errors,
+        }
+
+    def _client_export_inputs_fingerprint(self) -> str:
+        parts = [
+            CLIENT_EXPORT_RENDER_REV,
+            'allow-lan=' + ('1' if client_allow_lan() else '0'),
+            'local=' + sha256_file(self.local_nodes_file),
+            'merged=' + sha256_file(self.merged_output_file),
+            'disabled=' + sha256_file(self.disabled_file),
+        ]
+        return sha256_text('\n'.join(parts))
+
+    def _load_client_export_meta(self) -> Dict[str, Any]:
+        path = self.client_export_meta_file
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def publish_client_clash_config(self, fetch_remote: bool = False) -> Dict[str, Any]:
+        """Validate a fresh render; only then replace last-good bytes.
+
+        Illegal YAML never changes the served version. Clash Verge treats a
+        remote profile version as the content hash, so keeping last-good
+        (plus a stable ETag) is what stops a broken render from being adopted.
+        Last-good is re-validated before being served so a corrupt file cannot
+        become the client version.
+        """
+        last = self._usable_last_good()
+        kernel_bin = self.root / 'mihomo'
+        if last is not None and not fetch_remote:
+            meta = self._load_client_export_meta()
+            if (
+                meta.get('inputs') == self._client_export_inputs_fingerprint()
+                and meta.get('sha256') == last[1]
+            ):
+                return {
+                    'ok': True,
+                    'published': False,
+                    'served_last_good': False,
+                    'yaml': last[0],
+                    'sha256': last[1],
+                    'errors': [],
+                }
+        try:
+            candidate = self.render_client_clash_config(fetch_remote=fetch_remote)
+        except Exception as e:
+            errors = [f'render: {e}']
+            if last is not None:
+                return self._serve_last_good(last, errors)
+            raise ClientExportInvalid(errors) from e
+
+        digest = sha256_text(candidate)
+        inputs = self._client_export_inputs_fingerprint()
+        if last is not None and digest == last[1]:
+            meta = {
+                'sha256': digest,
+                'inputs': inputs,
+                'updatedAt': datetime.now(timezone.utc).isoformat(),
+                'bytes': len(candidate.encode('utf-8')),
+            }
+            safe_atomic_write(self.client_export_meta_file, json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
+            return {
+                'ok': True,
+                'published': False,
+                'served_last_good': False,
+                'yaml': last[0],
+                'sha256': digest,
+                'errors': [],
+            }
+
+        errors = validate_client_clash_yaml(
+            candidate,
+            kernel_bin=kernel_bin,
+            workdir=self.root,
+        )
+        if errors:
+            if last is not None:
+                return self._serve_last_good(last, errors)
+            raise ClientExportInvalid(errors)
+
+        safe_atomic_write(self.client_export_file, candidate)
+        meta = {
+            'sha256': digest,
+            'inputs': inputs,
+            'updatedAt': datetime.now(timezone.utc).isoformat(),
+            'bytes': len(candidate.encode('utf-8')),
+        }
+        safe_atomic_write(self.client_export_meta_file, json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
+        return {
+            'ok': True,
+            'published': True,
+            'served_last_good': False,
+            'yaml': candidate,
+            'sha256': digest,
+            'errors': [],
+        }
 
 
 # ---------------------------------------------------------
@@ -1458,7 +2466,7 @@ def main():
     parser.add_argument('--import-nodes', nargs=2, metavar=('NAME', 'TEXT'), help='Import nodes from raw text')
     parser.add_argument('--reconcile', action='store_true', help='Reconcile and regenerate merged airport config')
     parser.add_argument('--fetch', action='store_true', help='Force re-fetching remote subscriptions during reconcile')
-    parser.add_argument('--prune-dead', action='store_true', help='Test and prune dead nodes into disabled denylist')
+    parser.add_argument('--prune-dead', action='store_true', help='Mihomo :9090 delay prune (VPS controller). Panel toolkit uses prune_local_node_file instead.')
     parser.add_argument('--export-client', action='store_true', help='Print a complete Clash Meta client YAML to stdout')
     parser.add_argument('--batch-size', type=int, default=15, help='Batch size for health checks (default: 15)')
     parser.add_argument('--max-workers', type=int, default=5, help='Max concurrent workers for health checks (default: 5)')
@@ -1509,7 +2517,8 @@ def main():
         sys.exit(0 if res.get('success') else 1)
 
     if args.export_client:
-        print(engine.render_client_clash_config(fetch_remote=args.fetch), end='')
+        published = engine.publish_client_clash_config(fetch_remote=args.fetch)
+        print(published['yaml'], end='')
         sys.exit(0)
 
     parser.print_help()

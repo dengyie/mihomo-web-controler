@@ -164,6 +164,8 @@ class GatewayEndpointsTests(unittest.TestCase):
             'name': 'MyAirPort',
             'type': 'raw',
             'raw_content': ss_uri,
+            'probe': False,
+            'inject_local': False,
         }
         h2 = _FakeRequestHarness(self.gw, 'POST', '/panel/api/subscriptions', body=json.dumps(payload), auth_token=self.token)
         self.gw.Handler._dispatch(h2.handler, 'POST')
@@ -220,6 +222,8 @@ class GatewayEndpointsTests(unittest.TestCase):
         payload = {
             'name': 'BatchImport',
             'text': raw_text,
+            'probe': False,
+            'inject_local': False,
         }
         h = _FakeRequestHarness(self.gw, 'POST', '/panel/api/subscriptions/import-nodes', body=json.dumps(payload), auth_token=self.token)
         self.gw.Handler._dispatch(h.handler, 'POST')
@@ -303,6 +307,11 @@ class GatewayEndpointsTests(unittest.TestCase):
         self.gw.Handler._dispatch(h.handler, 'GET')
         self.assertEqual(h.response_status, 200)
         self.assertIn('yaml', h.response_headers.get('Content-Type', ''))
+        disp = h.response_headers.get('Content-Disposition', '')
+        self.assertEqual(disp, 'attachment; filename=mango-clash')
+        self.assertNotIn('\\', disp)
+        self.assertNotIn('"', disp)
+        self.assertEqual(h.response_headers.get('profile-title'), 'mango-clash')
         body = h.handler.wfile.getvalue().decode('utf-8')
         doc = yaml.safe_load(body)
         self.assertEqual(doc['proxies'][0]['name'], '[Export] Export-Node')
@@ -310,6 +319,10 @@ class GatewayEndpointsTests(unittest.TestCase):
         self.assertEqual(doc['rules'][-1], 'MATCH,PROXY')
         self.assertTrue(doc['tun']['enable'])
         self.assertEqual(doc['tun']['stack'], 'gvisor')
+        self.assertTrue(h.response_headers.get('ETag', '').strip('"'))
+        self.assertNotEqual(h.response_headers.get('X-Mango-Clash-Stale'), '1')
+        last_good = self.clash_dir / 'airports' / 'mango-clash.yaml'
+        self.assertTrue(last_good.exists())
 
         info = _FakeRequestHarness(self.gw, 'GET', '/panel/api/client-sub', auth_token=self.token)
         self.gw.Handler._dispatch(info.handler, 'GET')
@@ -321,6 +334,66 @@ class GatewayEndpointsTests(unittest.TestCase):
         unauth_info = _FakeRequestHarness(self.gw, 'GET', '/panel/api/client-sub', auth_token=None)
         self.gw.Handler._dispatch(unauth_info.handler, 'GET')
         self.assertEqual(unauth_info.response_status, 401)
+
+    def test_client_clash_export_keeps_last_good_on_invalid_render(self):
+        os.environ['CLIENT_SUB_TOKEN'] = 'client-export-token'
+        sm = self.gw.get_sub_manager()
+        engine = sm.SubscriptionEngine(root=self.clash_dir)
+        imported = engine.import_raw_nodes(
+            name='Export',
+            raw_text='ss://YWVzLTEyOC1nY206cA==@9.9.9.9:8388#Export-Node',
+        )
+        self.assertTrue(imported.get('success'))
+
+        h1 = _FakeRequestHarness(self.gw, 'GET', '/sub/clash?token=client-export-token', auth_token=None)
+        self.gw.Handler._dispatch(h1.handler, 'GET')
+        self.assertEqual(h1.response_status, 200)
+        good_body = h1.handler.wfile.getvalue()
+        good_etag = h1.response_headers.get('ETag')
+        last_good = (self.clash_dir / 'airports' / 'mango-clash.yaml').read_bytes()
+
+        def broken_render(self, fetch_remote=False):
+            return (
+                "proxies:\n"
+                "  - name: ZooProxy-HK\n"
+                "    type: http\n"
+                "    server: 127.0.0.1\n"
+                "    port: 1\n"
+                "    dialer-proxy: AnyTLS-googlevps\n"
+                "proxy-groups:\n"
+                "  - name: PROXY\n"
+                "    type: select\n"
+                "    proxies: [ZooProxy-HK, DIRECT]\n"
+            )
+
+        with mock.patch.object(sm.SubscriptionEngine, 'render_client_clash_config', broken_render), \
+                mock.patch.object(
+                    sm.SubscriptionEngine,
+                    '_client_export_inputs_fingerprint',
+                    return_value='force-rerender',
+                ):
+            h2 = _FakeRequestHarness(self.gw, 'GET', '/sub/clash?token=client-export-token', auth_token=None)
+            self.gw.Handler._dispatch(h2.handler, 'GET')
+        self.assertEqual(h2.response_status, 200)
+        self.assertEqual(h2.handler.wfile.getvalue(), good_body)
+        self.assertEqual(h2.response_headers.get('ETag'), good_etag)
+        self.assertEqual(h2.response_headers.get('X-Mango-Clash-Stale'), '1')
+        self.assertEqual((self.clash_dir / 'airports' / 'mango-clash.yaml').read_bytes(), last_good)
+
+        h3 = _FakeRequestHarness(self.gw, 'GET', '/sub/clash?token=client-export-token', auth_token=None)
+        h3.handler.headers['If-None-Match'] = good_etag
+        self.gw.Handler._dispatch(h3.handler, 'GET')
+        self.assertEqual(h3.response_status, 304)
+        self.assertEqual(h3.handler.wfile.getvalue(), b'')
+        self.assertEqual(h3.response_headers.get('ETag'), good_etag)
+        self.assertNotEqual(h3.response_headers.get('X-Mango-Clash-Stale'), '1')
+
+        h4 = _FakeRequestHarness(self.gw, 'GET', '/sub/clash?token=client-export-token', auth_token=None)
+        h4.handler.headers['If-None-Match'] = f'W/{good_etag}'
+        self.gw.Handler._dispatch(h4.handler, 'GET')
+        self.assertEqual(h4.response_status, 304)
+        self.assertEqual(h4.handler.wfile.getvalue(), b'')
+        self.assertEqual(h4.response_headers.get('ETag'), good_etag)
 
     # -------------------------------------------------------------
     # Rule Simulation API Tests
@@ -337,6 +410,119 @@ class GatewayEndpointsTests(unittest.TestCase):
         self.assertEqual(res['data']['matched_rule']['payload'], 'openai.com')
         self.assertEqual(res['data']['matched_rule']['target'], 'PROXY')
         self.assertIn('https://1.1.1.1/dns-query', res['data']['dns']['nameservers'])
+
+    def test_simulate_rejects_config_path_escape(self):
+        payload = {'domain': 'example.com', 'config_path': '/etc/passwd'}
+        h = _FakeRequestHarness(self.gw, 'POST', '/panel/api/rules/simulate', body=json.dumps(payload), auth_token=self.token)
+        self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 400)
+        self.assertIn('CLASH_ROOT', h.get_json()['error'])
+
+    def test_import_nodes_defaults_to_skip_merge(self):
+        ss = 'ss://YWVzLTEyOC1nY206cA==@9.9.9.9:8388#Skip-HTTP'
+        h = _FakeRequestHarness(
+            self.gw,
+            'POST',
+            '/panel/api/subscriptions/import-nodes',
+            body=json.dumps({'name': 'PanelPaste', 'text': ss, 'probe': False}),
+            auth_token=self.token,
+        )
+        self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 200)
+        sm = self.gw.get_sub_manager()
+        engine = sm.SubscriptionEngine(root=self.clash_dir)
+        listed = engine.list_subscriptions()
+        self.assertTrue(listed[0]['skip_merge'])
+        merged_path = self.clash_dir / 'airports' / 'airport-merged-sub.yaml'
+        merged = yaml.safe_load(merged_path.read_text()) if merged_path.exists() else {}
+        names = [p['name'] for p in (merged.get('proxies') or [])]
+        self.assertEqual(names, [])
+
+    def test_http_add_subscription_defaults_to_skip_merge(self):
+        ss = 'ss://YWVzLTEyOC1nY206cA==@9.9.9.9:8388#HttpAdd'
+        h = _FakeRequestHarness(
+            self.gw,
+            'POST',
+            '/panel/api/subscriptions',
+            body=json.dumps({'name': 'HttpAdd', 'type': 'raw', 'raw_content': ss, 'probe': False, 'inject_local': False}),
+            auth_token=self.token,
+        )
+        self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 200)
+        sm = self.gw.get_sub_manager()
+        engine = sm.SubscriptionEngine(root=self.clash_dir)
+        listed = engine.list_subscriptions()
+        self.assertTrue(listed[0]['skip_merge'])
+
+    def test_http_import_injects_alive_into_local_nodes(self):
+        ss = 'ss://YWVzLTEyOC1nY206cA==@9.9.9.9:8388#Inject-HTTP'
+        sm_mod = self.gw.get_sub_manager()
+
+        def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+            return list(nodes), []
+
+        with mock.patch.object(sm_mod, 'probe_nodes', side_effect=fake_probe):
+            h = _FakeRequestHarness(
+                self.gw,
+                'POST',
+                '/panel/api/subscriptions/import-nodes',
+                body=json.dumps({'name': 'InjectHTTP', 'text': ss}),
+                auth_token=self.token,
+            )
+            self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 200)
+        body = h.get_json()
+        self.assertEqual(body['data']['inject']['injected'], 1)
+        local = yaml.safe_load((self.clash_dir / 'airports' / 'local-nodes.yaml').read_text())
+        names = [p['name'] for p in local['proxies']]
+        self.assertIn('[InjectHTTP] Inject-HTTP', names)
+
+    def test_prune_get_is_rejected(self):
+        h = _FakeRequestHarness(self.gw, 'GET', '/panel/api/diagnostics/prune-dead-nodes', auth_token=self.token)
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 405)
+
+    def test_mihomo_proxy_rejects_unknown_path(self):
+        h = _FakeRequestHarness(self.gw, 'GET', '/panel/api/debug/pprof', auth_token=self.token)
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 403)
+
+    def test_delay_url_must_be_allowlisted(self):
+        h = _FakeRequestHarness(
+            self.gw,
+            'GET',
+            '/panel/api/proxies/Foo/delay?url=http://169.254.169.254/',
+            auth_token=self.token,
+        )
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 403)
+
+    def test_add_remote_fetch_failure_returns_502(self):
+        sm_mod = self.gw.get_sub_manager()
+        with mock.patch.object(
+            sm_mod.SubscriptionEngine,
+            'fetch_url',
+            side_effect=ValueError('HTTP 500'),
+        ):
+            h = _FakeRequestHarness(
+                self.gw,
+                'POST',
+                '/panel/api/subscriptions',
+                body=json.dumps({'name': 'Down', 'url': 'https://sub.example.com/clash'}),
+                auth_token=self.token,
+            )
+            self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 502)
+        body = h.get_json()
+        self.assertEqual(body['status'], 'error')
+        self.assertTrue(str(body['error']).startswith('Fetch failed'))
+
+    def test_index_html_does_not_contain_panel_password(self):
+        html = (REPO_ROOT / 'zashboard' / 'dist' / 'index.html').read_text()
+        self.assertNotIn('__PANEL_PASSWORD__', html)
+        self.assertNotIn(self.token, html)
+        gw_src = (REPO_ROOT / 'zashboard' / 'gateway.py').read_text()
+        self.assertNotIn("data.replace(b'__PANEL_PASSWORD__'", gw_src)
 
 
 if __name__ == '__main__':

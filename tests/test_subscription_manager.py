@@ -697,16 +697,144 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     assert "https://doh.pub/dns-query" in doc["dns"]["proxy-server-nameserver"]
     assert "+.argotunnel.com" in doc["dns"]["fake-ip-filter"]
     assert "DOMAIN-SUFFIX,mangoqwq.com,DIRECT" in doc["rules"]
+    assert "DOMAIN,accounts.google.com,🎯Google" in doc["rules"]
+    assert "DOMAIN-SUFFIX,google.com,🎯Google" in doc["rules"]
     assert doc["rules"][-1] == "MATCH,PROXY"
     assert doc["tun"]["enable"] is True
     assert doc["tun"]["stack"] == "gvisor"
+    assert doc["allow-lan"] is False
     assert "any:53" in doc["tun"]["dns-hijack"]
     groups = {g["name"]: g for g in doc["proxy-groups"]}
     assert groups["PROXY"]["type"] == "select"
     assert groups["AUTO"]["type"] == "url-test"
+    assert groups["🎯Google"]["type"] == "url-test"
+    assert groups["🎯Google"]["url"] == "https://accounts.google.com/"
+    assert groups["🎯Google"]["proxies"] == ["PROXY"]
     assert "[Airport] Airport-Dead" not in groups["PROXY"]["proxies"]
     assert "HK-Reality" in groups["PROXY"]["proxies"]
     assert sentinel.read_text(encoding="utf-8") == before
+
+
+def test_client_google_group_uses_us_nodes_not_azure(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "🇺🇸【北美洲】美国01原生丨直连【2x】", "type": "hysteria2", "server": "us.example.com", "port": 443},
+                    {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+                    {"name": "美国高速 04| BGP", "type": "vless", "server": "bgp2.example.com", "port": 443},
+                    {"name": "US-Los Angeles-435916-gtvs", "type": "vless", "server": "la.example.com", "port": 443},
+                    {"name": "VLESS-Azure-Reality", "type": "vless", "server": "104.208.65.233", "port": 443},
+                    {"name": "TUIC-googlevps", "type": "tuic", "server": "vps.example.com", "port": 443},
+                    {"name": "🇭🇰【亚洲】香港01丨直连", "type": "vless", "server": "hk.example.com", "port": 443},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    doc = yaml.safe_load(yaml_text)
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    google = groups["🎯Google"]["proxies"]
+    assert "🇺🇸【北美洲】美国01原生丨直连【2x】" in google
+    assert "美国_BGP_A" in google
+    assert "美国高速 04| BGP" not in google
+    assert "US-Los Angeles-435916-gtvs" not in google
+    assert "VLESS-Azure-Reality" not in google
+    assert "TUIC-googlevps" not in google
+    assert "🇭🇰【亚洲】香港01丨直连" not in google
+
+
+def test_client_export_drops_unresolved_dialer_proxy(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {
+                        "name": "Keep-Direct",
+                        "type": "ss",
+                        "server": "1.2.3.4",
+                        "port": 8388,
+                    },
+                    {
+                        "name": "ZooProxy-HK",
+                        "type": "http",
+                        "server": "127.0.0.1",
+                        "port": 44302,
+                        "dialer-proxy": "AnyTLS-googlevps",
+                    },
+                    {
+                        "name": "Chain-Mid",
+                        "type": "http",
+                        "server": "127.0.0.1",
+                        "port": 1,
+                        "dialer-proxy": "ZooProxy-HK",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    doc = yaml.safe_load(yaml_text)
+    names = [p["name"] for p in doc["proxies"]]
+    assert names == ["Keep-Direct"]
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert "ZooProxy-HK" not in groups["PROXY"]["proxies"]
+    assert "Chain-Mid" not in groups["AUTO"]["proxies"]
+    assert "AnyTLS-googlevps" not in yaml_text
+
+
+def test_save_local_nodes_file_keeps_simple_groups(temp_clash_root):
+    path = temp_clash_root / "airports" / "local-nodes.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sm.save_local_nodes_file(
+        path,
+        [
+            {"name": "Alive-A", "type": "ss", "server": "1.2.3.4", "port": 1, "_probe": "ok"},
+            {"name": "VPS-B", "type": "vless", "server": "5.6.7.8", "port": 443},
+            {"name": "Dead-C", "type": "ss", "server": "9.9.9.9", "port": 1},
+        ],
+        groups={"vps-import": ["VPS-B", "Dead-C", "Missing"], "google": ["Alive-A"]},
+    )
+    sm.save_local_nodes_file(
+        path,
+        [
+            {"name": "Alive-A", "type": "ss", "server": "1.2.3.4", "port": 1},
+            {"name": "VPS-B", "type": "vless", "server": "5.6.7.8", "port": 443},
+        ],
+    )
+    doc = yaml.safe_load(path.read_text())
+    assert [p["name"] for p in doc["proxies"]] == ["Alive-A", "VPS-B"]
+    assert "_probe" not in doc["proxies"][0]
+    assert doc["groups"]["vps-import"] == ["VPS-B"]
+    assert doc["groups"]["google"] == ["Alive-A"]
+
+
+def test_client_google_group_uses_simple_groups_list(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Pinned-US", "type": "hysteria2", "server": "us.example.com", "port": 443},
+                    {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+                    {"name": "VLESS-Azure-Reality", "type": "vless", "server": "104.208.65.233", "port": 443},
+                ],
+                "groups": {"google": ["Pinned-US"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    doc = yaml.safe_load(yaml_text)
+    google = {g["name"]: g for g in doc["proxy-groups"]}["🎯Google"]["proxies"]
+    assert google == ["Pinned-US"]
 
 
 def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
@@ -736,9 +864,668 @@ def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatc
     assert sentinel.read_text(encoding="utf-8") == before
 
 
+def test_fetch_url_refuses_redirects(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    assert engine.root == temp_clash_root
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(
+            sm,
+            "_http_get_pinned",
+            return_value=(302, {"location": "http://127.0.0.1/secret"}, b"", "1.2.3.4"),
+        ):
+            with pytest.raises(ValueError, match="redirect refused"):
+                engine.fetch_url("https://public-sub.example/clash")
+
+
+def test_fetch_url_caps_body(temp_clash_root, monkeypatch):
+    class _Huge:
+        def read(self, n):
+            return b"x" * n
+
+    with pytest.raises(ValueError, match="size limit"):
+        sm._read_capped(_Huge(), 8)
+
+
 def test_get_or_create_client_token_env_wins(temp_clash_root, monkeypatch):
     monkeypatch.setenv("CLIENT_SUB_TOKEN", "pinned-from-env")
     engine = SubscriptionEngine(root=temp_clash_root)
     assert engine.get_or_create_client_token() == "pinned-from-env"
+
+
+def test_get_or_create_client_token_file_is_group_readable(temp_clash_root, monkeypatch):
+    monkeypatch.delenv("CLIENT_SUB_TOKEN", raising=False)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    token = engine.get_or_create_client_token()
+    path = temp_clash_root / "subscriptions" / "client-export.token"
+    assert path.read_text(encoding="utf-8").strip() == token
+    mode = path.stat().st_mode & 0o777
+    assert mode == 0o640
+
+
+def test_get_or_create_client_token_repairs_owner_only_mode(temp_clash_root, monkeypatch):
+    monkeypatch.delenv("CLIENT_SUB_TOKEN", raising=False)
+    path = temp_clash_root / "subscriptions" / "client-export.token"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("existing-token\n", encoding="utf-8")
+    path.chmod(0o600)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    assert engine.get_or_create_client_token() == "existing-token"
+    assert (path.stat().st_mode & 0o777) == 0o640
+
+
+def test_inject_alive_into_local_nodes_skips_dead(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    ss_alive = "ss://YWVzLTEyOC1nY206eA==@1.2.3.4:8388#Keep"
+    ss_dead = "ss://YWVzLTEyOC1nY206eA==@5.6.7.8:8388#Drop"
+    sentinel = temp_clash_root / "config.yaml"
+    sentinel.write_text("proxies: []\n", encoding="utf-8")
+    before = sentinel.read_text(encoding="utf-8")
+
+    def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+        alive = [n for n in nodes if "Keep" in str(n.get("name"))]
+        dead = [n for n in nodes if "Drop" in str(n.get("name"))]
+        return alive, dead
+
+    monkeypatch.setattr(sm, "probe_nodes", fake_probe)
+    res = engine.add_subscription(
+        name="Pool",
+        sub_type="raw",
+        raw_content=f"{ss_alive}\n{ss_dead}",
+        skip_merge=True,
+        inject_local=True,
+        probe=True,
+    )
+    assert res["success"] is True
+    assert res["inject"]["injected"] == 1
+    assert res["inject"]["dead"] == 1
+    local = yaml.safe_load((temp_clash_root / "airports" / "local-nodes.yaml").read_text())
+    names = [p["name"] for p in local["proxies"]]
+    assert names == ["[Pool] Keep"]
+    disabled_path = temp_clash_root / "airports" / "disabled-nodes.txt"
+    disabled_text = disabled_path.read_text() if disabled_path.exists() else ""
+    assert "[Pool] Drop" not in disabled_text
+    assert sentinel.read_text(encoding="utf-8") == before
+
+
+def test_prune_local_node_file_writes_denylist(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Alive-A", "type": "ss", "server": "1.2.3.4", "port": 1},
+                    {"name": "Dead-B", "type": "ss", "server": "5.6.7.8", "port": 1},
+                    {"name": "UDP-C", "type": "tuic", "server": "9.9.9.9", "port": 443},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    sentinel = temp_clash_root / "config.yaml"
+    sentinel.write_text("proxies:\n- name: Keep-VPS\n  type: ss\n  server: 1.1.1.1\n  port: 1\n", encoding="utf-8")
+    before = sentinel.read_text(encoding="utf-8")
+
+    def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+        alive, dead = [], []
+        for n in nodes:
+            if n["name"] == "Dead-B":
+                dead.append(n)
+            else:
+                alive.append(n)
+        return alive, dead
+
+    monkeypatch.setattr(sm, "probe_nodes", fake_probe)
+    res = engine.prune_local_node_file(apply_filter=True)
+    assert res["success"] is True
+    assert res["dead_count"] == 1
+    assert "Dead-B" in res["newly_dead"]
+    local = yaml.safe_load((temp_clash_root / "airports" / "local-nodes.yaml").read_text())
+    names = [p["name"] for p in local["proxies"]]
+    assert "Alive-A" in names
+    assert "UDP-C" in names
+    assert "Dead-B" not in names
+    assert "Dead-B" in (temp_clash_root / "airports" / "disabled-nodes.txt").read_text()
+    assert sentinel.read_text(encoding="utf-8") == before
+
+
+def test_udp_node_types_skip_tcp_probe():
+    ok, reason = sm.probe_node_tcp({"name": "hy", "type": "hysteria2", "server": "1.2.3.4", "port": 443})
+    assert ok is True
+    assert reason == "udp-skip"
+
+
+def test_probe_node_tcp_rejects_private_without_connecting():
+    ok, reason = sm.probe_node_tcp({"name": "lan", "type": "ss", "server": "127.0.0.1", "port": 8388})
+    assert ok is False
+    assert reason == sm.PROBE_REASON_SSRF
+
+
+def test_probe_nodes_keep_ssrf_on_prune():
+    node = {"name": "lan", "type": "ss", "server": "10.0.0.1", "port": 8388}
+    alive, dead = sm.probe_nodes([node], keep_ssrf=True)
+    assert [n["name"] for n in alive] == ["lan"]
+    assert dead == []
+    alive2, dead2 = sm.probe_nodes([node], keep_ssrf=False)
+    assert alive2 == []
+    assert [n["name"] for n in dead2] == ["lan"]
+
+
+def _load_apply_local_import():
+    path = ROOT / "clash" / "apply-local-import.py"
+    spec = importlib.util.spec_from_file_location("apply_local_import", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_apply_local_import_skips_without_vps_group(temp_clash_root, monkeypatch, capsys):
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "All-A", "type": "ss", "server": "1.1.1.1", "port": 1},
+                    {"name": "All-B", "type": "ss", "server": "2.2.2.2", "port": 1},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        "proxies:\n- name: Keep-VPS\n  type: ss\n  server: 1.1.1.1\n  port: 1\n"
+        "proxy-groups:\n- name: 🌐 本机导入\n  type: select\n  proxies: [Keep-VPS]\n",
+        encoding="utf-8",
+    )
+    before = cfg.read_text()
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    out = capsys.readouterr().out
+    assert "no groups.vps-import" in out
+    assert cfg.read_text() == before
+
+
+def test_apply_local_import_uses_vps_import_subset(temp_clash_root, monkeypatch, capsys):
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Pool-A", "type": "ss", "server": "1.1.1.1", "port": 1},
+                    {"name": "VPS-Only", "type": "vless", "server": "2.2.2.2", "port": 443},
+                    {"name": "Pool-C", "type": "ss", "server": "3.3.3.3", "port": 1},
+                ],
+                "groups": {"vps-import": ["VPS-Only"], "google": ["Pool-A"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        "proxies:\n- name: Keep-VPS\n  type: ss\n  server: 9.9.9.9\n  port: 1\n"
+        "proxy-groups:\n- name: 🌐 本机导入\n  type: select\n  proxies: [Keep-VPS]\n"
+        "- name: PROXY\n  type: select\n  proxies: [Keep-VPS]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert "VPS-Only" in names
+    assert "Pool-A" not in names
+    assert "Pool-C" not in names
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups["🌐 本机导入"]["proxies"] == ["VPS-Only"]
+    assert groups["PROXY"]["proxies"] == ["Keep-VPS"]
+
+
+def test_add_remote_fetch_failure_is_not_success(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(SubscriptionEngine, "fetch_url", side_effect=ValueError("HTTP 500")):
+        res = engine.add_subscription(name="Down", url="https://sub.example.com/clash")
+    assert res["success"] is False
+    assert str(res["error"]).startswith("Fetch failed")
+    assert res["subscription"]["last_error"].startswith("Fetch failed")
+
+
+def test_update_refresh_fetches_outside_lock_and_injects(temp_clash_root, monkeypatch):
+    import fcntl
+
+    engine = SubscriptionEngine(root=temp_clash_root)
+    yaml_v1 = """
+proxies:
+  - name: Keep
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-128-gcm
+    password: x
+"""
+    yaml_v2 = """
+proxies:
+  - name: Keep
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-128-gcm
+    password: x
+  - name: Extra
+    type: ss
+    server: 5.6.7.8
+    port: 8388
+    cipher: aes-128-gcm
+    password: x
+"""
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=yaml_v1):
+        added = engine.add_subscription(
+            name="Pool",
+            url="https://sub.example.com/clash",
+            skip_merge=True,
+            inject_local=False,
+        )
+    sub_id = added["subscription"]["id"]
+    lock_held_during_fetch = []
+
+    def fake_fetch(url):
+        with open(engine.lock_file, "a") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_held_during_fetch.append(False)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except BlockingIOError:
+                lock_held_during_fetch.append(True)
+        return yaml_v2
+
+    def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+        return list(nodes), []
+
+    monkeypatch.setattr(sm, "probe_nodes", fake_probe)
+    with patch.object(SubscriptionEngine, "fetch_url", side_effect=fake_fetch):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert lock_held_during_fetch == [False]
+    assert res["success"] is True
+    assert res["inject"]["injected"] == 2
+    local = yaml.safe_load((temp_clash_root / "airports" / "local-nodes.yaml").read_text())
+    names = [p["name"] for p in local["proxies"]]
+    assert "[Pool] Keep" in names
+    assert "[Pool] Extra" in names
+
+
+def test_update_refresh_fetch_failure_is_not_success(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    yaml_ok = """
+proxies:
+  - name: Keep
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-128-gcm
+    password: x
+"""
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=yaml_ok):
+        added = engine.add_subscription(
+            name="Pool",
+            url="https://sub.example.com/clash",
+            skip_merge=True,
+            inject_local=False,
+        )
+    sub_id = added["subscription"]["id"]
+    with patch.object(SubscriptionEngine, "fetch_url", side_effect=ValueError("HTTP 502")):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert res["success"] is False
+    assert str(res["error"]).startswith("Fetch failed")
+
+
+def test_inject_caps_probe_candidates(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    lines = [
+        f"ss://YWVzLTEyOC1nY206eA==@1.2.3.{i}:8388#N{i}"
+        for i in range(1, 6)
+    ]
+    seen = []
+
+    def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+        seen.append(len(nodes))
+        return list(nodes), []
+
+    monkeypatch.setattr(sm, "NODE_PROBE_MAX_CANDIDATES", 2)
+    monkeypatch.setattr(sm, "probe_nodes", fake_probe)
+    res = engine.add_subscription(
+        name="Cap",
+        sub_type="raw",
+        raw_content="\n".join(lines),
+        skip_merge=True,
+        inject_local=True,
+        probe=True,
+    )
+    assert seen == [2]
+    assert res["inject"]["truncated"] is True
+    assert res["inject"]["probed"] == 2
+
+
+def test_prune_skips_replaced_endpoint(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Same", "type": "ss", "server": "5.6.7.8", "port": 1},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+        (airports / "local-nodes.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "proxies": [
+                        {"name": "Same", "type": "ss", "server": "9.9.9.9", "port": 443},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return [], list(nodes)
+
+    monkeypatch.setattr(sm, "probe_nodes", fake_probe)
+    res = engine.prune_local_node_file(apply_filter=True)
+    assert res["success"] is True
+    assert res["dead_count"] == 0
+    assert res["skipped_replaced"] == 1
+    local = yaml.safe_load((airports / "local-nodes.yaml").read_text())
+    assert local["proxies"][0]["server"] == "9.9.9.9"
+    disabled = (airports / "disabled-nodes.txt").read_text() if (airports / "disabled-nodes.txt").exists() else ""
+    assert "Same" not in disabled
+
+
+def test_hy2_uri_emits_hysteria2_type():
+    node = parse_hysteria2_uri("hy2://secret@1.2.3.4:443#Hy")
+    assert node is not None
+    assert node["type"] == "hysteria2"
+    ok, reason = sm.probe_node_tcp(node)
+    assert ok is True
+    assert reason == "udp-skip"
+
+
+def _minimal_client_yaml(extra_proxies=None, extra_group_members=None):
+    proxies = [
+        {
+            "name": "Keep-Direct",
+            "type": "ss",
+            "server": "1.2.3.4",
+            "port": 8388,
+            "cipher": "aes-128-gcm",
+            "password": "x",
+        }
+    ]
+    if extra_proxies:
+        proxies.extend(extra_proxies)
+    names = [p["name"] for p in proxies]
+    members = names + (extra_group_members or [])
+    doc = {
+        "mixed-port": 7897,
+        "proxies": proxies,
+        "proxy-groups": [
+            {"name": "PROXY", "type": "select", "proxies": ["AUTO"] + members + ["DIRECT"]},
+            {"name": "AUTO", "type": "url-test", "proxies": members or ["DIRECT"]},
+            {"name": "🎯Google", "type": "url-test", "proxies": ["PROXY"]},
+        ],
+        "rules": ["MATCH,PROXY"],
+    }
+    return yaml.safe_dump(doc, allow_unicode=True)
+
+
+def test_validate_client_clash_yaml_rejects_dangling_dialer():
+    text = _minimal_client_yaml(
+        extra_proxies=[
+            {
+                "name": "ZooProxy-HK",
+                "type": "http",
+                "server": "127.0.0.1",
+                "port": 44302,
+                "dialer-proxy": "AnyTLS-googlevps",
+            }
+        ]
+    )
+    errors = sm.validate_client_clash_yaml(text)
+    assert any("dialer-proxy" in e and "AnyTLS-googlevps" in e for e in errors)
+
+
+def test_validate_client_clash_yaml_rejects_missing_group_member():
+    text = _minimal_client_yaml(extra_group_members=["Ghost-Node"])
+    errors = sm.validate_client_clash_yaml(text)
+    assert any("Ghost-Node" in e for e in errors)
+
+
+def test_validate_client_clash_yaml_accepts_clean_export():
+    errors = sm.validate_client_clash_yaml(_minimal_client_yaml())
+    assert errors == []
+
+
+def test_publish_invalid_render_does_not_overwrite_last_good(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {
+                        "name": "Keep-Direct",
+                        "type": "ss",
+                        "server": "1.2.3.4",
+                        "port": 8388,
+                        "cipher": "aes-128-gcm",
+                        "password": "x",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    first = engine.publish_client_clash_config(fetch_remote=False)
+    assert first["published"] is True
+    assert first["served_last_good"] is False
+    last_path = temp_clash_root / "airports" / "mango-clash.yaml"
+    before = last_path.read_text(encoding="utf-8")
+    digest = first["sha256"]
+
+    def broken_render(fetch_remote=False):
+        return _minimal_client_yaml(
+            extra_proxies=[
+                {
+                    "name": "ZooProxy-HK",
+                    "type": "http",
+                    "server": "127.0.0.1",
+                    "port": 1,
+                    "dialer-proxy": "AnyTLS-googlevps",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(engine, "render_client_clash_config", broken_render)
+    monkeypatch.setattr(engine, "_client_export_inputs_fingerprint", lambda: "force-rerender")
+    second = engine.publish_client_clash_config(fetch_remote=False)
+    assert second["published"] is False
+    assert second["served_last_good"] is True
+    assert second["sha256"] == digest
+    assert last_path.read_text(encoding="utf-8") == before
+    assert any("dialer-proxy" in e for e in second["errors"])
+
+
+def test_publish_without_last_good_raises(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    monkeypatch.setattr(
+        engine,
+        "render_client_clash_config",
+        lambda fetch_remote=False: "proxies: []\nproxy-groups: []\n",
+    )
+    with pytest.raises(sm.ClientExportInvalid):
+        engine.publish_client_clash_config(fetch_remote=False)
+    assert not (temp_clash_root / "airports" / "mango-clash.yaml").exists()
+
+
+def test_validate_rejects_proxy_name_colliding_with_group():
+    text = _minimal_client_yaml(
+        extra_proxies=[
+            {
+                "name": "PROXY",
+                "type": "ss",
+                "server": "1.2.3.4",
+                "port": 1,
+                "cipher": "aes-128-gcm",
+                "password": "x",
+            }
+        ]
+    )
+    errors = sm.validate_client_clash_yaml(text)
+    assert any("PROXY" in e and "collid" in e.lower() for e in errors)
+
+
+def test_validate_rejects_duplicate_group_names():
+    doc = yaml.safe_load(_minimal_client_yaml())
+    doc["proxy-groups"].append({"name": "AUTO", "type": "select", "proxies": ["DIRECT"]})
+    errors = sm.validate_client_clash_yaml(yaml.safe_dump(doc, allow_unicode=True))
+    assert any("duplicate group" in e for e in errors)
+
+
+def test_publish_corrupt_last_good_is_not_served(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "mango-clash.yaml").write_text(
+        "this is not clash yaml\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        engine,
+        "render_client_clash_config",
+        lambda fetch_remote=False: "proxies: []\nproxy-groups: []\n",
+    )
+    with pytest.raises(sm.ClientExportInvalid):
+        engine.publish_client_clash_config(fetch_remote=False)
+    assert (temp_clash_root / "airports" / "mango-clash.yaml").read_text() == "this is not clash yaml\n"
+
+
+def test_publish_replaces_corrupt_last_good_with_valid_render(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "mango-clash.yaml").write_text("corrupt\n", encoding="utf-8")
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {
+                        "name": "Keep-Direct",
+                        "type": "ss",
+                        "server": "1.2.3.4",
+                        "port": 8388,
+                        "cipher": "aes-128-gcm",
+                        "password": "x",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    res = engine.publish_client_clash_config(fetch_remote=False)
+    assert res["published"] is True
+    assert res["served_last_good"] is False
+    assert "Keep-Direct" in res["yaml"]
+    assert "corrupt" not in (temp_clash_root / "airports" / "mango-clash.yaml").read_text()
+
+
+def test_validate_rejects_unknown_rule_outbound():
+    doc = yaml.safe_load(_minimal_client_yaml())
+    doc["rules"] = ["MATCH,Ghost-Outbound"]
+    errors = sm.validate_client_clash_yaml(yaml.safe_dump(doc, allow_unicode=True))
+    assert any("Ghost-Outbound" in e for e in errors)
+
+
+def test_publish_skips_render_when_sources_unchanged(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {
+                        "name": "Keep-Direct",
+                        "type": "ss",
+                        "server": "1.2.3.4",
+                        "port": 8388,
+                        "cipher": "aes-128-gcm",
+                        "password": "x",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    renders = []
+    original = engine.render_client_clash_config
+
+    def counted(fetch_remote=False):
+        renders.append(fetch_remote)
+        return original(fetch_remote=fetch_remote)
+
+    monkeypatch.setattr(engine, "render_client_clash_config", counted)
+    first = engine.publish_client_clash_config(fetch_remote=False)
+    assert first["published"] is True
+    assert len(renders) == 1
+    second = engine.publish_client_clash_config(fetch_remote=False)
+    assert second["published"] is False
+    assert second["sha256"] == first["sha256"]
+    assert len(renders) == 1
+
+
+def test_publish_skips_kernel_when_content_unchanged(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {
+                        "name": "Keep-Direct",
+                        "type": "ss",
+                        "server": "1.2.3.4",
+                        "port": 8388,
+                        "cipher": "aes-128-gcm",
+                        "password": "x",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    dummy = temp_clash_root / "mihomo"
+    dummy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    dummy.chmod(0o755)
+    calls = []
+
+    def fake_kernel(text, kernel_bin, workdir):
+        calls.append(str(kernel_bin))
+        return None
+
+    monkeypatch.setattr(sm, "_kernel_test_client_yaml", fake_kernel)
+    first = engine.publish_client_clash_config(fetch_remote=False)
+    assert first["published"] is True
+    assert len(calls) == 1
+    second = engine.publish_client_clash_config(fetch_remote=False)
+    assert second["published"] is False
+    assert second["served_last_good"] is False
+    assert second["sha256"] == first["sha256"]
+    assert len(calls) == 1
 
 

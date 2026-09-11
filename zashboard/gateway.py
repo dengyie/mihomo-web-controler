@@ -33,9 +33,7 @@ SUBSCRIPTION_MANAGER_PATH = CLASH_ROOT / 'subscription-manager.py'
 
 # Static file byte cache. /personal is NFS, so every uncached request costs a
 # full file read round-trip; validate by (mtime_ns, size) so file swaps are
-# always picked up. NOTE: the per-request __PANEL_PASSWORD__ injection happens
-# AFTER this cache (on the cached raw bytes), so a panel-password rotation does
-# not require invalidating anything here.
+# always picked up. index.html is never rewritten with the panel password.
 _STATIC_CACHE = {}
 _STATIC_CACHE_MAX_ENTRIES = 64
 _STATIC_CACHE_MAX_BYTES = 32 * 1024 * 1024  # bound memory: hashed assets stay on
@@ -79,6 +77,20 @@ def get_sub_manager():
 
 def is_pxed_host() -> bool:
     return os.path.exists('/data/tuntunshu') or 'pxed' in socket.gethostname()
+
+
+def _etag_matches(if_none_match: str, digest: str) -> bool:
+    """True when If-None-Match names this sha256 (quoted, weak, or list)."""
+    if not if_none_match or not digest:
+        return False
+    wanted = {digest, f'"{digest}"', f'W/"{digest}"'}
+    for raw in if_none_match.split(','):
+        token = raw.strip()
+        if token in wanted:
+            return True
+        if token.startswith('W/') and token[2:].strip() in wanted:
+            return True
+    return False
 
 
 def get_local_ip() -> str:
@@ -163,12 +175,142 @@ def get_reconciler():
 def panel_password():
     """Return the panel API password, or '' if no panel.password file is    \
     configured. No hardcoded default: this gateway must fail closed (deny    \
-    /panel/api) rather than expose a well-known credential. The same value is    \
-    injected into the served ``index.html`` in place of the __PANEL_PASSWORD__    \
-    placeholder so the frontend never ships a literal secret."""
+    /panel/api) rather than expose a well-known credential. The password is    \
+    never injected into static HTML."""
     if PANEL_PASSWORD_FILE.exists():
         return PANEL_PASSWORD_FILE.read_text().strip() or ''
     return ''
+
+
+def consteq(left: str, right: str) -> bool:
+    """Length-safe constant-time compare.
+
+    CPython 3.10 ``secrets.compare_digest`` raises ValueError when the
+    arguments differ in length; CI runs 3.10. Never compare until both
+    sides are non-empty strings of equal length.
+    """
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    if not left or not right or len(left) != len(right):
+        return False
+    return secrets.compare_digest(left, right)
+
+
+MAX_BODY_BYTES = 1 * 1024 * 1024
+
+# Mihomo controller paths the public panel is allowed to reach through /panel/api.
+# Anything else (PUT /configs with an arbitrary path, GET /debug/pprof, ...) is 403.
+MIHOMO_PROXY_GET = {
+    '/configs',
+    '/configs/geo',
+    '/connections',
+    '/dns/query',
+    '/group/weights',
+    '/providers/proxies',
+    '/providers/rules',
+    '/proxies',
+    '/rules',
+    '/version',
+    '/traffic',
+    '/logs',
+    '/memory',
+    '/upgrade',
+    '/upgrade/ui',
+    '/restart',
+}
+MIHOMO_PROXY_MUTATE = {
+    '/configs',
+    '/configs/geo',
+    '/connections',
+    '/proxies',
+    '/providers/proxies',
+    '/providers/rules',
+    '/restart',
+    '/rules/disable',
+    '/upgrade',
+    '/upgrade/ui',
+    '/cache/dns/flush',
+    '/cache/fakeip/flush',
+    '/cache/smart/flush',
+}
+MIHOMO_DELAY_URLS = {
+    'http://www.gstatic.com/generate_204',
+    'https://www.gstatic.com/generate_204',
+    'http://1.1.1.1/cdn-cgi/trace',
+    'https://1.1.1.1/cdn-cgi/trace',
+    'https://cloudflare.com/cdn-cgi/trace',
+    'http://www.gstatic.com/generate_204',
+}
+
+
+def _read_request_body(handler, limit: int = MAX_BODY_BYTES) -> bytes:
+    raw_len = handler.headers.get('Content-Length', '0') or '0'
+    try:
+        length = int(raw_len)
+    except (TypeError, ValueError):
+        raise ValueError('Invalid Content-Length')
+    if length < 0:
+        raise ValueError('Invalid Content-Length')
+    if length > limit:
+        raise ValueError(f'Request body exceeds {limit} bytes')
+    return handler.rfile.read(length) if length else b''
+
+
+def _mihomo_path_allowed(method: str, api_p: str) -> bool:
+    """Allow only the Clash Meta paths the panel actually uses."""
+    if not api_p.startswith('/'):
+        api_p = '/' + api_p
+    method = method.upper()
+    if api_p in STREAM_ENDPOINTS:
+        return method in ('GET', 'HEAD', 'OPTIONS')
+    if api_p.endswith('/delay') or api_p.endswith('/healthcheck'):
+        return method in ('GET', 'HEAD')
+    if method in ('GET', 'HEAD', 'OPTIONS'):
+        if api_p in MIHOMO_PROXY_GET:
+            return True
+        # /proxies/<name>, /group/<name>, /providers/proxies/<name>, /connections/<id>
+        prefixes = (
+            '/proxies/',
+            '/group/',
+            '/providers/proxies/',
+            '/providers/rules/',
+            '/connections/',
+        )
+        return any(api_p.startswith(p) for p in prefixes)
+    if method in ('PUT', 'PATCH', 'POST', 'DELETE'):
+        if api_p in MIHOMO_PROXY_MUTATE:
+            return True
+        prefixes = (
+            '/proxies/',
+            '/providers/proxies/',
+            '/providers/rules/',
+            '/connections/',
+            '/cache/',
+        )
+        if any(api_p.startswith(p) for p in prefixes):
+            if api_p.startswith('/cache/') and not api_p.endswith('/flush'):
+                return False
+            return True
+        return False
+    return False
+
+
+def _sandbox_config_path(raw) -> Optional[Path]:
+    """Resolve config_path under CLASH_ROOT. Reject traversal / absolute escapes."""
+    if raw is None or raw == '':
+        return None
+    clash_base = Path(CLASH_ROOT).resolve()
+    candidate = Path(str(raw))
+    if not candidate.is_absolute():
+        candidate = clash_base / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(clash_base)
+    except (ValueError, OSError):
+        raise ValueError('config_path must stay under CLASH_ROOT')
+    if not resolved.is_file():
+        raise ValueError('config_path is not a file under CLASH_ROOT')
+    return resolved
 
 
 def _startup_diagnostics():
@@ -370,16 +512,15 @@ def _is_authenticated(handler) -> bool:
     secret = panel_password()
     if not secret:
         # Fail closed: an empty/missing password must NEVER open the panel.
-        # Otherwise `compare_digest('', '')` is True and the query-token path
-        # would authenticate an unauthenticated request. Reject outright.
         return False
     value = handler.headers.get('Authorization', '')
     if value:
-        return secrets.compare_digest(value, 'Bearer ' + secret)
+        prefix = 'Bearer '
+        if not value.startswith(prefix):
+            return False
+        return consteq(value[len(prefix):], secret)
     token = parse_qs(urlsplit(handler.path).query).get('token', [''])[0]
-    # Require a non-empty token on the query-string path so `?token=` empty
-    # cannot match a real secret (or an empty one) via compare_digest.
-    return bool(token) and secrets.compare_digest(token, secret)
+    return bool(token) and consteq(token, secret)
 
 
 # Backwards compatibility alias if needed by external callers
@@ -495,8 +636,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         subpath = rel_path[len('/panel/api/subscriptions'):].strip('/')
         parts = [p for p in subpath.split('/') if p]
 
-        length = int(self.headers.get('Content-Length', '0'))
-        body_bytes = self.rfile.read(length) if length else b''
+        try:
+            body_bytes = _read_request_body(self)
+        except ValueError as e:
+            self.send_json(413 if 'exceeds' in str(e) else 400, {'status': 'error', 'error': str(e)})
+            return
         payload = {}
         if body_bytes:
             try:
@@ -519,7 +663,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {'status': 'error', 'error': 'Missing raw text / content for import'})
                 return
             exclude_filter = payload.get('exclude_filter')
-            res = engine.import_raw_nodes(name=name, raw_text=raw_text, exclude_filter=exclude_filter)
+            skip_merge = payload.get('skip_merge', True)
+            inject_local = payload.get('inject_local', True)
+            probe = payload.get('probe', True)
+            res = engine.import_raw_nodes(
+                name=name,
+                raw_text=raw_text,
+                exclude_filter=exclude_filter,
+                skip_merge=bool(skip_merge),
+                inject_local=bool(inject_local),
+                probe=bool(probe),
+            )
             if res.get('success'):
                 cache_invalidate('local')
                 self.send_json(200, {'status': 'ok', 'data': res})
@@ -538,6 +692,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sub_type = payload.get('type', 'remote' if url else 'raw')
             exclude_filter = payload.get('exclude_filter')
             enabled = payload.get('enabled', True)
+            skip_merge = payload.get('skip_merge', True)
+            inject_local = payload.get('inject_local', True)
+            probe = payload.get('probe', True)
 
             res = engine.add_subscription(
                 name=name,
@@ -546,12 +703,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raw_content=raw_content,
                 exclude_filter=exclude_filter,
                 enabled=enabled,
+                skip_merge=bool(skip_merge),
+                inject_local=bool(inject_local),
+                probe=bool(probe),
             )
             if res.get('success'):
                 cache_invalidate('local')
                 self.send_json(200, {'status': 'ok', 'data': res})
             else:
-                self.send_json(400, {'status': 'error', 'error': res.get('error', 'Add failed'), 'data': res})
+                err = res.get('error', 'Add failed')
+                code = 502 if str(err).startswith('Fetch failed') else 400
+                self.send_json(code, {'status': 'error', 'error': err, 'data': res})
             return
 
         # POST /panel/api/subscriptions/<sub_id>/update
@@ -563,6 +725,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             exclude_filter = payload.get('exclude_filter')
             enabled = payload.get('enabled')
             refresh = payload.get('refresh', True)
+            inject_local = payload.get('inject_local')
+            probe = payload.get('probe', True)
 
             res = engine.update_subscription(
                 sub_id=sub_id,
@@ -572,14 +736,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 exclude_filter=exclude_filter,
                 enabled=enabled,
                 refresh=refresh,
+                inject_local=None if inject_local is None else bool(inject_local),
+                probe=bool(probe),
             )
             if res.get('success'):
                 cache_invalidate('local')
                 self.send_json(200, {'status': 'ok', 'data': res})
             else:
-                self.send_json(404 if 'not found' in res.get('error', '').lower() else 400, {
+                err = res.get('error', 'Update failed')
+                err_l = err.lower()
+                if 'not found' in err_l:
+                    code = 404
+                elif str(err).startswith('Fetch failed'):
+                    code = 502
+                else:
+                    code = 400
+                self.send_json(code, {
                     'status': 'error',
-                    'error': res.get('error', 'Update failed'),
+                    'error': err,
                     'data': res,
                 })
             return
@@ -632,9 +806,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cache_invalidate('local')
                 self.send_json(200, {'status': 'ok', 'data': res})
             else:
-                self.send_json(404 if 'not found' in res.get('error', '').lower() else 400, {
+                err = res.get('error', 'Update failed')
+                err_l = err.lower()
+                if 'not found' in err_l:
+                    code = 404
+                elif str(err).startswith('Fetch failed'):
+                    code = 502
+                else:
+                    code = 400
+                self.send_json(code, {
                     'status': 'error',
-                    'error': res.get('error', 'Update failed'),
+                    'error': err,
                     'data': res,
                 })
             return
@@ -665,10 +847,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             expected = engine.get_or_create_client_token()
         except Exception:
             expected = ''
-        if expected and secrets.compare_digest(token, expected):
+        if expected and consteq(token, expected):
             return True
         panel = panel_password()
-        return bool(panel) and secrets.compare_digest(token, panel)
+        return bool(panel) and consteq(token, panel)
 
     def _handle_client_sub(self, method: str):
         """Public Clash client YAML: GET /sub/clash?token=...
@@ -696,15 +878,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            yaml_text = engine.render_client_clash_config(fetch_remote=False)
+            published = engine.publish_client_clash_config(fetch_remote=False)
+        except sm.ClientExportInvalid as e:
+            self.send_json(500, {'status': 'error', 'error': str(e), 'errors': e.errors})
+            return
         except Exception as e:
             self.send_json(500, {'status': 'error', 'error': str(e)})
             return
+        yaml_text = published.get('yaml') or ''
         body = yaml_text.encode('utf-8')
+        digest = str(published.get('sha256') or '')
+        etag = f'"{digest}"' if digest else None
+        if published.get('served_last_good'):
+            print(
+                'mango-clash serving last-good sha256=%s errors=%s'
+                % (digest[:12], '; '.join(str(e) for e in (published.get('errors') or [])[:4])),
+                flush=True,
+            )
+        if etag:
+            inm = (self.headers.get('If-None-Match') or '').strip()
+            if _etag_matches(inm, digest):
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', 'private, max-age=0, must-revalidate')
+                self.send_header('profile-title', 'mango-clash')
+                if published.get('served_last_good'):
+                    self.send_header('X-Mango-Clash-Stale', '1')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
         self.send_response(200)
         self.send_header('Content-Type', 'text/yaml; charset=utf-8')
-        self.send_header('Content-Disposition', 'attachment; filename="clash-client.yaml"')
-        self.send_header('Cache-Control', 'no-store')
+        # Unquoted filename token. Clash Verge copies this header into the
+        # remote profile name; a quoted RFC 2183 value becomes a literal
+        # backslash-quote in the Verge UI.
+        self.send_header('Content-Disposition', 'attachment; filename=mango-clash')
+        self.send_header('profile-title', 'mango-clash')
+        self.send_header('Cache-Control', 'private, max-age=0, must-revalidate')
+        if etag:
+            self.send_header('ETag', etag)
+        if published.get('served_last_good'):
+            self.send_header('X-Mango-Clash-Stale', '1')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if method != 'HEAD':
@@ -749,15 +963,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         subpath = rel_path[len('/panel/api/diagnostics'):].strip('/')
-        if subpath == 'prune-dead-nodes' and method in ('POST', 'GET'):
+        if subpath == 'prune-dead-nodes' and method == 'POST':
             query_params = parse_qs(urlsplit(self.path).query)
-            batch_size_str = query_params.get('batch_size', ['15'])[0]
             max_workers_str = query_params.get('max_workers', ['5'])[0]
-            max_cand_str = query_params.get('max_candidates', ['30'])[0]
             dry_run_str = query_params.get('dry_run', ['false'])[0].lower()
-            batch_size = int(batch_size_str) if batch_size_str.isdigit() else 15
             max_workers = int(max_workers_str) if max_workers_str.isdigit() else 5
-            max_candidates = int(max_cand_str) if max_cand_str.isdigit() else 30
+            max_workers = max(1, min(max_workers, 16))
             dry_run = dry_run_str in ('true', '1', 'yes')
 
             try:
@@ -771,10 +982,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             try:
                 engine = sm.SubscriptionEngine()
-                res = engine.prune_dead_nodes(
-                    batch_size=batch_size,
+                res = engine.prune_local_node_file(
                     max_workers=max_workers,
-                    max_candidates=max_candidates,
                     apply_filter=not dry_run,
                 )
                 if res.get('success'):
@@ -887,11 +1096,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(parsed.query)
             domain = (qs.get('domain') or qs.get('query') or [''])[0]
-            if qs.get('config_path'):
-                config_path = Path(qs['config_path'][0])
+            raw_cfg = (qs.get('config_path') or [None])[0]
         else:
-            length = int(self.headers.get('Content-Length', '0'))
-            body_bytes = self.rfile.read(length) if length else b''
+            try:
+                body_bytes = _read_request_body(self)
+            except ValueError as e:
+                self.send_json(413 if 'exceeds' in str(e) else 400, {'status': 'error', 'error': str(e)})
+                return
             payload = {}
             if body_bytes:
                 try:
@@ -900,8 +1111,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json(400, {'status': 'error', 'error': f'Invalid JSON body: {e}'})
                     return
             domain = payload.get('domain', '')
-            if payload.get('config_path'):
-                config_path = Path(payload['config_path'])
+            raw_cfg = payload.get('config_path')
+
+        if raw_cfg:
+            try:
+                config_path = _sandbox_config_path(raw_cfg)
+            except ValueError as e:
+                self.send_json(400, {'status': 'error', 'error': str(e)})
+                return
 
         if not domain or not isinstance(domain, str):
             self.send_json(400, {'status': 'error', 'error': "Missing or invalid required field 'domain'"})
@@ -945,8 +1162,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
             return
 
-        length = int(self.headers.get('Content-Length', '0'))
-        body_bytes = self.rfile.read(length) if length else b''
+        try:
+            body_bytes = _read_request_body(self)
+        except ValueError as e:
+            self.send_json(413 if 'exceeds' in str(e) else 400, {'error': str(e)})
+            return
         payload = {}
         if body_bytes:
             try:
@@ -1028,7 +1248,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('WWW-Authenticate', 'Bearer')
             self.end_headers()
             return
-        if api_path(rel_path) in STREAM_ENDPOINTS and self.headers.get('Upgrade', '').lower() != 'websocket':
+        api_p = api_path(rel_path)
+        if not _mihomo_path_allowed(method, api_p):
+            self.send_json(403, {'status': 'error', 'error': f'Mihomo path not allowed: {method} {api_p}'})
+            return
+        if api_p in STREAM_ENDPOINTS and self.headers.get('Upgrade', '').lower() != 'websocket':
             self.send_response(426)
             self.send_header('Content-Length', '0')
             self.send_header('Upgrade', 'websocket')
@@ -1050,6 +1274,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'https://1.1.1.1/cdn-cgi/trace',
             ):
                 query_params['url'] = ['https://cloudflare.com/cdn-cgi/trace']
+                test_url = 'https://cloudflare.com/cdn-cgi/trace'
+            if test_url and test_url not in MIHOMO_DELAY_URLS:
+                self.send_json(403, {'status': 'error', 'error': 'delay url is not allowlisted'})
+                return
         query = ('?' + urlencode(query_params, doseq=True)) if query_params else ''
         target = suffix or '/'
 
@@ -1075,8 +1303,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if secret_file.exists():
             controller_secret = secret_file.read_text().strip()
         headers['Authorization'] = 'Bearer ' + controller_secret
-        length = int(self.headers.get('Content-Length', '0'))
-        body = self.rfile.read(length) if length else None
+        try:
+            body = _read_request_body(self)
+        except ValueError as e:
+            self.send_json(413 if 'exceeds' in str(e) else 400, {'status': 'error', 'error': str(e)})
+            return
+        body = body or None
         try:
             conn.request(method, target + query, body=body, headers=headers)
             resp = conn.getresponse()
@@ -1117,6 +1349,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(401)
             self.send_header('Content-Length', '0')
             self.end_headers()
+            return
+        api_p = api_path(rel_path)
+        if api_p not in STREAM_ENDPOINTS:
+            self.send_json(403, {'status': 'error', 'error': f'WebSocket path not allowed: {api_p}'})
             return
         upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
         try:
@@ -1203,8 +1439,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pw = panel_password()
             if pw:
                 headers['Authorization'] = 'Bearer ' + pw
-        length = int(self.headers.get('Content-Length', '0'))
-        body = self.rfile.read(length) if length else None
+        try:
+            body = _read_request_body(self)
+        except ValueError as e:
+            self.send_json(413 if 'exceeds' in str(e) else 400, {'status': 'error', 'error': str(e)})
+            return
+        body = body or None
         try:
             conn.request(method, remote_path_with_query, body=body, headers=headers)
             resp = conn.getresponse()
@@ -1419,14 +1659,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self.send_error(404)
             return
-        if target.name == 'index.html':
-            # Inject the real panel password into the served entry page in place
-            # of the __PANEL_PASSWORD__ placeholder. index.html is served with
-            # Cache-Control: no-store (below) so the injected secret is never
-            # cached. The seed script in index.html refreshes the stored
-            # credential to this value on every load (self-healing), so a
-            # browser carrying a stale pre-fix hardcoded password self-corrects.
-            data = data.replace(b'__PANEL_PASSWORD__', panel_password().encode('utf-8'))
         self.send_response(200)
         self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
         self.send_header('Content-Length', str(len(data)))

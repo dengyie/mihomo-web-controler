@@ -73,14 +73,14 @@ Mihomo (Clash Meta) Web 控制面板、自定义规则管理、多源订阅聚�
 - **事务性回滚**：任一步骤失败（含 Controller 异常）自动通过历史备份原子恢复旧配置。
 - **精准前缀剥离**：删除用户自定义规则时，绝对不会误伤订阅原有的同名规则。
 - **NFS 跨进程排他锁**：使用 `fcntl.flock` 保障多并发操作安全。
-- **恒定时间鉴权**：使用 `secrets.compare_digest` 校验 Bearer Token，彻底防御时序侧信道攻击。
+- **恒定时间鉴权**：`consteq` 先对齐非空等长再 `secrets.compare_digest`（兼容 CI Python 3.10 不等长抛错）。
 - **模块热重载**：网关检测到 Reconciler 与 Subscription Manager 脚本时间戳（`mtime`）变更时自动热重载，无需重启网关进程。
 
 ---
 
 ### 6. 安全 API 网关与双机跨节点协同 (`gateway.py`)
 - 单源对外服务（静态资源托管 + API 反向代理 + WebSocket 流量转发）。
-- 服务端注入 Mihomo `.controller-secret`，前端全程零 Secret 暴露。
+- 服务端注入 Mihomo `.controller-secret`，前端全程零 Secret 暴露（`index.html` **不再**把 `panel.password` 写进页面 / localStorage）。
 - **双机集群智能路由**：自动识别本端环境（`tebi` macOS 主机 / `pxed` Linux VPS 主机），透明代理跨节点流量（如 `/panel/pxed/api/*` 与 `/panel/tebi/api/*`）。
 - **NFS 静态字节缓存**：针对分布式 NFS 文件系统设计高效的静态资源内存缓存（`_STATIC_CACHE`），结合 `mtime_ns` / `size` 自动失效。
 
@@ -181,7 +181,7 @@ assets/user-rules-ui   │ (注入 Secret)         egress-ip                /pan
 | :--- | :--- | :--- | :--- |
 | `GET` | `/panel/api/subscriptions` | 获取全量订阅列表及元数据 | 无 |
 | `POST` | `/panel/api/subscriptions` | 添加远程或本地订阅源 | `{"name":"Sub1","url":"https://...","exclude_filter":""}` |
-| `POST` | `/panel/api/subscriptions/import-nodes` | 批量导入 RAW 节点文本/链接 | `{"name":"Manual","text":"ss://... \n vmess://..."}` |
+| `POST` | `/panel/api/subscriptions/import-nodes` | 批量导入 RAW 节点（默认 `skip_merge: true`，不改 VPS 主配置） | `{"name":"Manual","text":"ss://...","skip_merge":true}` |
 | `POST` | `/panel/api/subscriptions/<sub_id>/update` | 更新订阅配置或强制刷新拉取 | `{"name":"Sub1","refresh":true}` |
 | `POST` | `/panel/api/subscriptions/<sub_id>/toggle` | 启用 / 停用指定订阅 | `{"enabled": true}` |
 | `DELETE` | `/panel/api/subscriptions/<sub_id>` | 删除指定订阅并重新聚合 | 无 |
@@ -268,7 +268,13 @@ node tests/test_ui_bundle.mjs
 ## 🔐 敏感信息过滤与安全说明
 
 - 本仓库严格遵循安全最佳实践，生产环境真实密码（`panel.password`）与控制器密钥（`.controller-secret`）均已纳入 `.gitignore`。
-- 首次部署时，请在 `zashboard/panel.password` 与 `clash/.controller-secret` 中填入对应环境的实际口令密钥。
+- 首次部署时，请在 `zashboard/panel.password` 与 `clash/.controller-secret` 中填入对应环境的实际口令密钥。浏览器打开 `/panel/` 后在 Setup 里填写同一口令；服务端 **不会** 把口令注入 HTML。
+- 订阅拉取：仅 http/https、解析后拒绝私网/环回/链路本地/云元数据、**不跟随重定向**、连接钉在校验时的 IP、响应体上限 8MiB。
+- Mihomo 反代：`/panel/api` 只转发面板实际使用的 Clash Meta 路径；`/delay?url=` 仅允许 generate_204 / cloudflare trace。
+- 规则推演 `config_path` 必须落在 `CLASH_ROOT` 下。死节点清理仅 `POST`，探测 `airports/local-nodes.yaml` 后写入 `disabled-nodes.txt` 并从该文件删除失效节点（不改 VPS `config.yaml`）。
+- 面板添加订阅 / 导入节点默认 `skip_merge` + TCP 探活后注入 `airports/local-nodes.yaml`。
+- 客户端 YAML `allow-lan` 默认 `false`；需要局域网入站时设 `CLIENT_ALLOW_LAN=1`。
+- `apply-local-import.py` 默认读 `airports/local-nodes.yaml`。节点文件只放 `proxies` 与简单名单 `groups`（`vps-import` / `google` / `grok`）；url-test、PROXY、Grok、Google 策略在脚本层。没有 `groups.vps-import` 时跳过，避免把全量节点灌进 VPS `🌐 本机导入`。`APPLY_LOCAL_IMPORT_FILE` 仍可覆盖路径，但必须落在 `CLASH_ROOT/airports/` 下。
 
 ---
 

@@ -360,8 +360,8 @@
     renderSubsSection();
 
     try {
-      showToast('正在低并发逐批检测死节点并进行健康过滤...', 'info');
-      const resp = await fetch(`${getApiBase()}/diagnostics/prune-dead-nodes?batch_size=15&max_workers=5`, {
+      showToast('正在探测节点文件并剔除失效节点...', 'info');
+      const resp = await fetch(`${getApiBase()}/diagnostics/prune-dead-nodes?max_workers=8`, {
         method: 'POST',
         headers: getAuthHeaders(),
       });
@@ -370,7 +370,8 @@
         throw new Error(json.error || `HTTP ${resp.status}`);
       }
       pruneState.lastResult = json.data;
-      showToast(`检测完成：存活 ${json.data?.alive_count || 0}，新增屏蔽死节点 ${json.data?.dead_count || 0} 个`, 'success');
+      const trunc = json.data?.truncated ? '（已截断探活）' : '';
+      showToast(`节点文件探测完成：存活 ${json.data?.alive_count || 0}，剔除失效 ${json.data?.dead_count || 0}${trunc}`, 'success');
       // 刷新订阅与代理缓存
       fetchSubscriptions();
     } catch (err) {
@@ -390,7 +391,7 @@
       const resp = await fetch(`${getApiBase()}/subscriptions`, {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ name, url, exclude_filter: excludeFilter }),
+        body: JSON.stringify({ name, url, exclude_filter: excludeFilter, skip_merge: true, inject_local: true, probe: true }),
       });
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
@@ -399,7 +400,13 @@
       subscriptionState.subInputUrl = '';
       subscriptionState.subInputFilter = '';
       await fetchSubscriptions();
-      showToast('订阅拉取并挂载成功', 'success');
+      const inj = json.data?.inject;
+      const trunc = inj?.truncated ? '（已截断探活）' : '';
+      if (inj) {
+        showToast(`已注入存活 ${inj.injected || 0}，跳过失效 ${inj.dead || 0}${trunc}`, 'success');
+      } else {
+        showToast('订阅已拉取（无节点可注入）', 'success');
+      }
     } catch (err) {
       showToast('添加订阅失败: ' + err.message, 'error');
     } finally {
@@ -416,7 +423,7 @@
       const resp = await fetch(`${getApiBase()}/subscriptions/import-nodes`, {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ name, content }),
+        body: JSON.stringify({ name, content, skip_merge: true, inject_local: true, probe: true }),
       });
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
@@ -424,7 +431,13 @@
       subscriptionState.nodesInputName = '';
       subscriptionState.nodesInputContent = '';
       await fetchSubscriptions();
-      showToast('节点解析并导入成功', 'success');
+      const inj = json.data?.inject;
+      const trunc = inj?.truncated ? '（已截断探活）' : '';
+      if (inj) {
+        showToast(`已注入存活 ${inj.injected || 0}，跳过失效 ${inj.dead || 0}${trunc}`, 'success');
+      } else {
+        showToast('节点已导入（无节点可注入）', 'success');
+      }
     } catch (err) {
       showToast('导入节点失败: ' + err.message, 'error');
     } finally {
@@ -445,7 +458,13 @@
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
       await fetchSubscriptions();
-      showToast('订阅更新成功', 'success');
+      const inj = json.data?.inject;
+      const trunc = inj?.truncated ? '（已截断探活）' : '';
+      if (inj) {
+        showToast(`订阅已刷新：注入存活 ${inj.injected || 0}，跳过失效 ${inj.dead || 0}${trunc}`, 'success');
+      } else {
+        showToast('订阅更新成功', 'success');
+      }
     } catch (err) {
       showToast('更新订阅失败: ' + err.message, 'error');
     } finally {
@@ -478,7 +497,7 @@
 
   async function deleteSubscription(subId, name) {
     if (subscriptionState.actionInProgress) return;
-    if (!confirm(`确定要删除订阅源 "${name}" 吗？其聚合节点将被同步移除。`)) return;
+    if (!confirm(`确定要删除订阅源 "${name}" 吗？已写入节点文件的节点不会自动收回，请用「剔除失效节点」。`)) return;
     subscriptionState.actionInProgress = `delete-${subId}`;
     renderSubsSection();
     try {
@@ -953,7 +972,7 @@
             <div class="flex justify-end gap-2">
               <button class="btn btn-ghost btn-sm" id="btn-cancel-add-sub">取消</button>
               <button class="btn btn-primary btn-sm" id="btn-submit-add-sub" ${subscriptionState.actionInProgress === 'add-sub' ? 'disabled' : ''}>
-                ${subscriptionState.actionInProgress === 'add-sub' ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('check', 'h-4 w-4')} 拉取并挂载
+                ${subscriptionState.actionInProgress === 'add-sub' ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('check', 'h-4 w-4')} 探活并注入
               </button>
             </div>
           </div>
@@ -964,7 +983,7 @@
             <div class="flex justify-end gap-2">
               <button class="btn btn-ghost btn-sm" id="btn-cancel-add-nodes">取消</button>
               <button class="btn btn-primary btn-sm" id="btn-submit-import-nodes" ${subscriptionState.actionInProgress === 'import-nodes' ? 'disabled' : ''}>
-                ${subscriptionState.actionInProgress === 'import-nodes' ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('check', 'h-4 w-4')} 解析并导入
+                ${subscriptionState.actionInProgress === 'import-nodes' ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('check', 'h-4 w-4')} 探活并注入
               </button>
             </div>
           </div>
@@ -985,8 +1004,8 @@
             <span>订阅源管理${isSubLoading ? ' <span class="loading loading-spinner loading-xs"></span>' : ''}</span>
           </div>
           <div class="flex items-center gap-2">
-            <button class="btn btn-sm btn-outline ${isPruning ? 'loading' : ''}" id="btn-prune-dead-nodes" title="分批平滑测试所有节点连通性，自动过滤死节点到黑名单" ${isAnyBusy || isPruning ? 'disabled' : ''}>
-              ${isPruning ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('shield-check', 'h-4 w-4')} 清理死节点
+            <button class="btn btn-sm btn-outline ${isPruning ? 'loading' : ''}" id="btn-prune-dead-nodes" title="探测 local-nodes.yaml：TCP 失败写入黑名单并从节点文件删除；私网地址保留" ${isAnyBusy || isPruning ? 'disabled' : ''}>
+              ${isPruning ? '<span class="loading loading-spinner loading-xs"></span>' : nativeIcon('shield', 'h-4 w-4')} 剔除失效节点
             </button>
             <button class="btn btn-sm" id="btn-show-add-sub" ${isAnyBusy || isPruning ? 'disabled' : ''}>${nativeIcon('plus', 'h-4 w-4')} 添加</button>
           </div>
@@ -1002,8 +1021,8 @@
         </div>
         ${lastPrune ? `
           <div class="p-3 bg-base-200/50 rounded-box text-xs flex items-center justify-between gap-2">
-            <span class="text-base-content/70">上次死节点探测：测查 ${lastPrune.tested_count || 0} 个，存活 <span class="text-success font-semibold">${lastPrune.alive_count || 0}</span>，过滤死节点 <span class="text-error font-semibold">${lastPrune.dead_count || 0}</span></span>
-            <span class="text-base-content/40 text-[10px]">保护基础白名单出口</span>
+            <span class="text-base-content/70">上次节点文件探测：测查 ${lastPrune.tested_count || 0} 个，存活 <span class="text-success font-semibold">${lastPrune.alive_count || 0}</span>，剔除失效 <span class="text-error font-semibold">${lastPrune.dead_count || 0}</span></span>
+            <span class="text-base-content/40 text-[10px]">只改 local-nodes.yaml</span>
           </div>
         ` : ''}
         ${addFormHtml}
