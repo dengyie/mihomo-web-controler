@@ -1,6 +1,7 @@
 import base64
 import importlib.util
 import json
+import socket
 import sys
 import urllib.error
 from pathlib import Path
@@ -707,8 +708,8 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     groups = {g["name"]: g for g in doc["proxy-groups"]}
     assert groups["PROXY"]["type"] == "select"
     assert groups["AUTO"]["type"] == "url-test"
-    assert groups["🎯Google"]["type"] == "url-test"
-    assert groups["🎯Google"]["url"] == "https://accounts.google.com/"
+    assert groups["🎯Google"]["type"] == "select"
+    assert "url" not in groups["🎯Google"]
     assert groups["🎯Google"]["proxies"] == ["PROXY"]
     assert "[Airport] Airport-Dead" not in groups["PROXY"]["proxies"]
     assert "HK-Reality" in groups["PROXY"]["proxies"]
@@ -833,8 +834,9 @@ def test_client_google_group_uses_simple_groups_list(temp_clash_root):
     )
     yaml_text = engine.render_client_clash_config(fetch_remote=False)
     doc = yaml.safe_load(yaml_text)
-    google = {g["name"]: g for g in doc["proxy-groups"]}["🎯Google"]["proxies"]
-    assert google == ["Pinned-US"]
+    google_group = {g["name"]: g for g in doc["proxy-groups"]}["🎯Google"]
+    assert google_group["type"] == "select"
+    assert google_group["proxies"] == ["Pinned-US"]
 
 
 def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
@@ -875,6 +877,93 @@ def test_fetch_url_refuses_redirects(temp_clash_root, monkeypatch):
         ):
             with pytest.raises(ValueError, match="redirect refused"):
                 engine.fetch_url("https://public-sub.example/clash")
+
+
+def test_fetch_url_proxy_fallback_success(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(sm, "_http_get_pinned", side_effect=TimeoutError("handshake timeout")):
+            with patch.object(
+                sm,
+                "_http_get_via_proxy",
+                return_value=(200, {}, b"proxies:\n- name: SG\n  type: vless\n  server: 1.2.3.4\n"),
+            ) as mock_proxy:
+                content = engine.fetch_url("https://overseas-sub.example/clash")
+                assert "SG" in content
+                mock_proxy.assert_called_once()
+
+
+def test_fetch_url_proxy_fallback_failure(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(sm, "_http_get_pinned", side_effect=TimeoutError("handshake timeout")):
+            with patch.object(
+                sm,
+                "_http_get_via_proxy",
+                side_effect=ConnectionRefusedError("proxy down"),
+            ):
+                with pytest.raises(ValueError, match="Fetch failed"):
+                    engine.fetch_url("https://overseas-sub.example/clash")
+
+
+def test_fetch_url_proxy_disabled_env(temp_clash_root, monkeypatch):
+    monkeypatch.setenv("SUB_FETCH_PROXY", "none")
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(sm, "_http_get_pinned", side_effect=TimeoutError("handshake timeout")):
+            with patch.object(sm, "_http_get_via_proxy") as mock_proxy:
+                with pytest.raises(TimeoutError, match="handshake timeout"):
+                    engine.fetch_url("https://overseas-sub.example/clash")
+                mock_proxy.assert_not_called()
+
+
+def test_http_get_via_proxy_schemeless_normalization():
+    with patch("http.client.HTTPSConnection") as mock_conn_cls:
+        mock_conn = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.getheaders.return_value = [("content-type", "text/yaml")]
+        mock_resp.read.side_effect = [b"proxies: []", b""]
+        mock_conn.getresponse.return_value = mock_resp
+        mock_conn_cls.return_value = mock_conn
+
+        status, headers, body = sm._http_get_via_proxy(
+            url="https://example.com/clash.yaml",
+            proxy_url="127.0.0.1:7897",
+            timeout=10,
+            user_agent="test-agent",
+        )
+
+        mock_conn_cls.assert_called_once()
+        args, kwargs = mock_conn_cls.call_args
+        assert args[0] == "127.0.0.1"
+        assert args[1] == 7897
+        mock_conn.set_tunnel.assert_called_once_with("example.com", 443, headers={"User-Agent": "test-agent"})
+        assert status == 200
+        assert body == b"proxies: []"
+
+
+def test_fetch_url_proxy_fallback_logs(temp_clash_root, monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("SUB_FETCH_PROXY", "127.0.0.1:7897")
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with caplog.at_level(logging.INFO):
+        with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+            with patch.object(sm, "_http_get_pinned", side_effect=TimeoutError("handshake timeout")):
+                with patch.object(
+                    sm,
+                    "_http_get_via_proxy",
+                    return_value=(200, {}, b"proxies: []"),
+                ) as mock_proxy:
+                    content = engine.fetch_url("https://overseas-sub.example/clash")
+                    assert content == "proxies: []"
+                    mock_proxy.assert_called_once_with(
+                        "https://overseas-sub.example/clash",
+                        proxy_url="127.0.0.1:7897",
+                        timeout=15,
+                        user_agent="ClashMeta/v1.18.0 mihomo/1.18.0",
+                    )
+                    assert any("falling back to proxy 127.0.0.1:7897" in record.message for record in caplog.records)
 
 
 def test_fetch_url_caps_body(temp_clash_root, monkeypatch):
@@ -1011,6 +1100,209 @@ def test_probe_nodes_keep_ssrf_on_prune():
     assert [n["name"] for n in dead2] == ["lan"]
 
 
+def test_ipv6_node_skips_tcp_probe_when_no_ipv6_route(monkeypatch):
+    monkeypatch.setattr(sm, "has_ipv6_route", lambda force_check=False: False)
+    node = {"name": "v6-node", "type": "vless", "server": "2606:4700:4700::1111", "port": 443}
+    ok, reason = sm.probe_node_tcp(node)
+    assert ok is True
+    assert reason == "ipv6-skip"
+
+
+def test_pin_resolved_ip_prefers_ipv4_when_no_ipv6_route(monkeypatch):
+    monkeypatch.setattr(sm, "has_ipv6_route", lambda force_check=False: False)
+    fake_addr_infos = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+    ]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: fake_addr_infos)
+    pinned = sm._pin_resolved_ip("dual-stack.example.com", allow_private=False)
+    assert pinned == "1.1.1.1"
+
+
+def test_inject_alive_into_local_nodes_with_target_group(temp_clash_root, monkeypatch):
+    engine = sm.SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump({
+            "proxies": [{"name": "Old-VPS", "type": "ss", "server": "9.9.9.9", "port": 1}],
+            "groups": {"vps-import": ["Old-VPS"]}
+        }),
+        encoding="utf-8"
+    )
+
+    nodes = [
+        {"name": "New-IPv4", "type": "ss", "server": "1.2.3.4", "port": 8388, "_probe": "tcp-ok"},
+        {"name": "New-IPv6", "type": "ss", "server": "2606::1", "port": 8388, "_probe": "ipv6-skip"},
+    ]
+    res = engine._inject_alive_into_local_nodes(nodes, probe=False, target_group="vps-import")
+    assert res["injected"] == 2
+    local_doc = sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")
+    proxy_names = [p["name"] for p in local_doc["proxies"]]
+    assert "New-IPv4" in proxy_names
+    assert "New-IPv6" in proxy_names
+    # Only IPv4 is added to vps-import; ipv6-skip is excluded from vps-import
+    assert local_doc["groups"]["vps-import"] == ["Old-VPS", "New-IPv4"]
+
+
+def test_add_subscription_defaults_target_group_and_filter(temp_clash_root, monkeypatch):
+    engine = sm.SubscriptionEngine(root=temp_clash_root)
+    # Pass empty exclude_filter and no target_group with inject_local=True
+    res = engine.add_subscription(
+        name="AutoGroupSub",
+        url="",
+        sub_type="raw",
+        raw_content="proxies:\n- name: AutoNode\n  type: ss\n  server: 1.2.3.4\n  port: 8388\n- name: 剩余流量：100GB\n  type: ss\n  server: 1.2.3.4\n  port: 8388\n",
+        exclude_filter="  ",
+        skip_merge=True,
+        inject_local=True,
+        probe=False,
+    )
+    assert res["success"] is True
+    meta = engine.load_meta()
+    sub = next(s for s in meta["subscriptions"] if s["name"] == "AutoGroupSub")
+    assert sub["target_group"] == "vps-import"
+    assert sub["exclude_filter"] == sm.DEFAULT_EXCLUDE_FILTER
+    # Traffic dummy node should be filtered out
+    assert sub["node_count"] == 1
+    local_doc = sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")
+    assert "[AutoGroupSub] AutoNode" in local_doc["groups"]["vps-import"]
+    assert "[AutoGroupSub] 剩余流量：100GB" not in [p["name"] for p in local_doc["proxies"]]
+
+
+def test_update_subscription_target_group_and_filter(temp_clash_root):
+    engine = sm.SubscriptionEngine(root=temp_clash_root)
+    res = engine.add_subscription(
+        name="SubToUpdate",
+        sub_type="raw",
+        raw_content="proxies:\n- name: N1\n  type: ss\n  server: 1.2.3.4\n  port: 8388\n",
+        skip_merge=False,
+        inject_local=False,
+    )
+    sub_id = res["subscription"]["id"]
+    up_res = engine.update_subscription(
+        sub_id=sub_id,
+        target_group="custom-group",
+        exclude_filter="  ",
+    )
+    assert up_res["success"] is True
+    assert up_res["subscription"]["target_group"] == "custom-group"
+    assert up_res["subscription"]["exclude_filter"] == sm.DEFAULT_EXCLUDE_FILTER
+
+
+def test_delete_subscription_retracts_injected_nodes(temp_clash_root):
+    engine = sm.SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump({
+            "proxies": [
+                {"name": "Keep-VPS", "type": "ss", "server": "9.9.9.9", "port": 1},
+            ],
+            "groups": {"vps-import": ["Keep-VPS"]},
+        }),
+        encoding="utf-8",
+    )
+    res = engine.add_subscription(
+        name="RetractSub",
+        sub_type="raw",
+        raw_content="proxies:\n- name: N1\n  type: ss\n  server: 1.2.3.4\n  port: 8388\n",
+        skip_merge=True,
+        inject_local=True,
+        probe=False,
+    )
+    assert res["success"] is True
+    local_doc = sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")
+    assert "[RetractSub] N1" in local_doc["groups"]["vps-import"]
+
+    del_res = engine.delete_subscription(res["subscription"]["id"])
+    assert del_res["success"] is True
+    assert del_res["retracted"] == 1
+    local_doc = sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")
+    names = [p["name"] for p in local_doc["proxies"]]
+    assert "[RetractSub] N1" not in names
+    assert "Keep-VPS" in names
+    assert local_doc["groups"]["vps-import"] == ["Keep-VPS"]
+
+
+def test_rename_subscription_retracts_old_prefixed_nodes(temp_clash_root):
+    engine = sm.SubscriptionEngine(root=temp_clash_root)
+    res = engine.add_subscription(
+        name="OldName",
+        sub_type="raw",
+        raw_content="proxies:\n- name: N1\n  type: ss\n  server: 1.2.3.4\n  port: 8388\n",
+        skip_merge=True,
+        inject_local=True,
+        probe=False,
+    )
+    sub_id = res["subscription"]["id"]
+    local_doc = sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")
+    assert "[OldName] N1" in local_doc["groups"]["vps-import"]
+
+    up_res = engine.update_subscription(sub_id=sub_id, name="NewName")
+    assert up_res["success"] is True
+    local_doc = sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")
+    names = [p["name"] for p in local_doc["proxies"]]
+    assert "[OldName] N1" not in names
+    assert local_doc["groups"].get("vps-import", []) == []
+
+
+def test_apply_local_import_auto_exclude_bk_prefix_only():
+    ali = _load_apply_local_import()
+    # `bk-` is a prefix marker, not a substring: names merely containing it stay.
+    assert ali.is_auto_excluded("BK-US-01") is True
+    assert ali.is_auto_excluded("bk-vps") is True
+    assert ali.is_auto_excluded("ABK-US-01") is False
+    assert ali.is_auto_excluded("node-bk-1") is False
+    assert ali.is_auto_excluded("JP-Reality") is False
+    assert ali.is_auto_excluded("VLESS-Azure-Reality") is True
+    assert ali.is_auto_excluded("Mac-Reverse-17897") is True
+    assert ali.is_auto_excluded("🏠home-win-CF") is True
+
+
+def test_apply_local_import_removes_orphaned_subscription_nodes(temp_clash_root, monkeypatch, capsys):
+    """A deleted subscription's injected nodes must stop persisting in config."""
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [{"name": "Keep-VPS", "type": "ss", "server": "9.9.9.9", "port": 1}],
+                "groups": {"vps-import": ["Keep-VPS"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Keep-VPS", "type": "ss", "server": "9.9.9.9", "port": 1},
+                    # Orphan: prefix present, name no longer in vps-import.
+                    {"name": "[DelMe] Orphan", "type": "ss", "server": "8.8.4.4", "port": 8388},
+                    # Normal hand-managed node: keeps its place.
+                    {"name": "Totally-Normal", "type": "ss", "server": "1.1.1.1", "port": 80},
+                ],
+                "proxy-groups": [
+                    {"name": "PROXY", "type": "select", "proxies": ["Keep-VPS", "[DelMe] Orphan", "Totally-Normal"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert "[DelMe] Orphan" not in names
+    assert "Keep-VPS" in names
+    assert "Totally-Normal" in names
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups["PROXY"]["proxies"] == ["Keep-VPS", "Totally-Normal"]
+
+
 def _load_apply_local_import():
     path = ROOT / "clash" / "apply-local-import.py"
     spec = importlib.util.spec_from_file_location("apply_local_import", path)
@@ -1086,6 +1378,149 @@ def test_apply_local_import_uses_vps_import_subset(temp_clash_root, monkeypatch,
     groups = {g["name"]: g for g in doc["proxy-groups"]}
     assert groups["🌐 本机导入"]["proxies"] == ["VPS-Only"]
     assert groups["PROXY"]["proxies"] == ["Keep-VPS"]
+
+
+def test_apply_local_import_purges_third_party_nodes(temp_clash_root, monkeypatch, capsys):
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Valid-VPS", "type": "vless", "server": "2.2.2.2", "port": 443},
+                ],
+                "groups": {"vps-import": ["Valid-VPS"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        "proxies:\n"
+        "- name: SUB-Airport-Node-1\n  type: ss\n  server: 1.1.1.1\n  port: 1\n"
+        "- name: JX-Airport-Node-2\n  type: ss\n  server: 1.1.1.2\n  port: 2\n"
+        "- name: GL-Airport-Node-3\n  type: ss\n  server: 1.1.1.3\n  port: 3\n"
+        "- name: JS-Airport-Node-4\n  type: ss\n  server: 1.1.1.4\n  port: 4\n"
+        "- name: KQ-Airport-Node-5\n  type: ss\n  server: 1.1.1.5\n  port: 5\n"
+        "- name: 续费备用节点\n  type: ss\n  server: 1.1.1.6\n  port: 6\n"
+        "- name: Normal-Node\n  type: ss\n  server: 1.1.1.7\n  port: 7\n"
+        "proxy-groups:\n"
+        "- name: 🌐 本机导入\n  type: select\n  proxies: [SUB-Airport-Node-1]\n"
+        "- name: 🔰ChatGPT\n  type: select\n  proxies: [SUB-Airport-Node-1, JX-Airport-Node-2]\n"
+        "- name: PROXY\n  type: select\n  proxies: [Normal-Node, SUB-Airport-Node-1]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert "Valid-VPS" in names
+    assert "Normal-Node" in names
+    for bad in ["SUB-Airport-Node-1", "JX-Airport-Node-2", "GL-Airport-Node-3", "JS-Airport-Node-4", "KQ-Airport-Node-5", "续费备用节点"]:
+        assert bad not in names
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups["🌐 本机导入"]["proxies"] == ["Valid-VPS"]
+    assert groups["🔰ChatGPT"]["proxies"] == ["PROXY"]
+    assert groups["PROXY"]["proxies"] == ["Normal-Node"]
+
+
+def test_apply_local_import_enrolls_into_proxy_and_auto_when_no_local_group(temp_clash_root, monkeypatch):
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Tomorin-1", "type": "vless", "server": "2.2.2.2", "port": 443},
+                ],
+                "groups": {"vps-import": ["Tomorin-1"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        "proxies:\n"
+        "- name: Existing-Node\n  type: ss\n  server: 1.1.1.7\n  port: 7\n"
+        "proxy-groups:\n"
+        "- name: PROXY\n  type: select\n  proxies: [Existing-Node]\n"
+        "- name: AUTO\n  type: url-test\n  proxies: [Existing-Node]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert "Tomorin-1" in names
+    assert "Existing-Node" in names
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert "Tomorin-1" in groups["PROXY"]["proxies"]
+    assert "Tomorin-1" in groups["AUTO"]["proxies"]
+
+
+def test_apply_local_import_sanitizes_special_groups(temp_clash_root, monkeypatch):
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Regular-Node", "type": "ss", "server": "1.1.1.1", "port": 443},
+                    {"name": "VLESS-Azure-Reality", "type": "vless", "server": "2.2.2.2", "port": 443},
+                    {"name": "BK-US-01", "type": "ss", "server": "3.3.3.3", "port": 443},
+                    {"name": "🏠home-win-CF", "type": "vless", "server": "4.4.4.4", "port": 443},
+                ],
+                "groups": {
+                    "vps-import": ["Regular-Node", "VLESS-Azure-Reality", "BK-US-01", "🏠home-win-CF"]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Mac-Reverse-17897", "type": "socks5", "server": "127.0.0.1", "port": 17897},
+                ],
+                "proxy-groups": [
+                    {"name": "PROXY", "type": "select", "proxies": ["Mac-Reverse-17897"]},
+                    {"name": "AUTO", "type": "url-test", "proxies": ["Mac-Reverse-17897", "🏠home-win-CF", "VLESS-Azure-Reality"]},
+                    {"name": "cpa-clean-egress", "type": "select", "proxies": ["Mac-Reverse-17897", "PROXY", "DIRECT"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    doc = yaml.safe_load(cfg.read_text())
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+
+    # PROXY should not have Mac-Reverse-17897
+    assert "Mac-Reverse-17897" not in groups["PROXY"]["proxies"]
+    assert "Regular-Node" in groups["PROXY"]["proxies"]
+
+    # AUTO should only have regular nodes; no Azure, no Reverse, no home-win, no BK-
+    assert "Regular-Node" in groups["AUTO"]["proxies"]
+    assert "Mac-Reverse-17897" not in groups["AUTO"]["proxies"]
+    assert "🏠home-win-CF" not in groups["AUTO"]["proxies"]
+    assert "VLESS-Azure-Reality" not in groups["AUTO"]["proxies"]
+    assert "BK-US-01" not in groups["AUTO"]["proxies"]
+
+    # cpa-clean-egress should have 🏠home-win-CF at the front, and no reverse/17897 nodes
+    assert groups["cpa-clean-egress"]["proxies"][0] == "🏠home-win-CF"
+    assert "Mac-Reverse-17897" not in groups["cpa-clean-egress"]["proxies"]
 
 
 def test_add_remote_fetch_failure_is_not_success(temp_clash_root):

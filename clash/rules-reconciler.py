@@ -241,10 +241,26 @@ def test_candidate_config(candidate_path: Path) -> Tuple[bool, str]:
 
 
 def reload_live() -> int:
+    try:
+        try:
+            from cluster_reload import reload_cluster
+        except ImportError:
+            clash_dir = str(Path(__file__).resolve().parent)
+            if clash_dir not in sys.path:
+                sys.path.insert(0, clash_dir)
+            from cluster_reload import reload_cluster
+
+        res = reload_cluster(config_path=ROOT / 'config.yaml')
+        loc = res['local']
+        if not loc.get('success'):
+            raise RuntimeError(f"Local reload failed: {loc.get('error')}")
+        return loc.get('status', 204)
+    except ImportError:
+        pass
     secret = get_controller_secret()
     req = urllib.request.Request(
         'http://127.0.0.1:9090/configs?force=true',
-        data=b'{"path":"/personal/clash/config.yaml"}',
+        data=json.dumps({'path': str(ROOT / 'config.yaml')}).encode('utf-8'),
         method='PUT',
         headers={
             'Authorization': f'Bearer {secret}',

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -48,7 +49,7 @@ LOCAL_NODES_FILE = ROOT / 'airports/local-nodes.yaml'
 CLIENT_EXPORT_FILE = ROOT / 'airports/mango-clash.yaml'
 CLIENT_EXPORT_META_FILE = ROOT / 'airports/mango-clash.meta.json'
 CLIENT_EXPORT_TOKEN_MODE = 0o640
-CLIENT_EXPORT_RENDER_REV = '1'
+CLIENT_EXPORT_RENDER_REV = '2'
 CLIENT_BUILTIN_OUTBOUNDS = frozenset({
     'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
 })
@@ -523,6 +524,24 @@ def is_safe_public_url(url: str, allow_private: bool = False) -> Tuple[bool, str
     return True, ""
 
 
+_HAS_IPV6_ROUTE: Optional[bool] = None
+
+
+def has_ipv6_route(force_check: bool = False) -> bool:
+    """Return True if host has a usable IPv6 route to the public internet."""
+    global _HAS_IPV6_ROUTE
+    if _HAS_IPV6_ROUTE is not None and not force_check:
+        return _HAS_IPV6_ROUTE
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(('2001:4860:4860::8888', 80))
+        s.close()
+        _HAS_IPV6_ROUTE = True
+    except Exception:
+        _HAS_IPV6_ROUTE = False
+    return _HAS_IPV6_ROUTE
+
+
 def _pin_resolved_ip(hostname: str, allow_private: bool) -> str:
     """Return one resolved address for hostname after the SSRF filter.
 
@@ -546,6 +565,8 @@ def _pin_resolved_ip(hostname: str, allow_private: bool) -> str:
     addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     if not addr_infos:
         raise ValueError(f"Could not resolve hostname '{hostname}'")
+    if not has_ipv6_route():
+        addr_infos = sorted(addr_infos, key=lambda info: 0 if info[0] == socket.AF_INET else 1)
     for info in addr_infos:
         ip_str = info[4][0]
         ip_obj = ipaddress.ip_address(ip_str)
@@ -605,6 +626,57 @@ def _http_get_pinned(url: str, timeout: int, user_agent: str) -> Tuple[int, dict
         header_map = {k.lower(): v for k, v in resp.getheaders()}
         body = _read_capped(resp, FETCH_MAX_BYTES)
         return resp.status, header_map, body, pinned_ip
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _http_get_via_proxy(
+    url: str,
+    proxy_url: str,
+    timeout: int,
+    user_agent: str,
+) -> Tuple[int, dict, bytes]:
+    """GET url via an HTTP proxy (e.g. http://127.0.0.1:7897). Does not follow redirects."""
+    proxy_clean = (proxy_url or '').strip()
+    if proxy_clean and '://' not in proxy_clean:
+        proxy_clean = f'http://{proxy_clean}'
+    proxy_parsed = urllib.parse.urlsplit(proxy_clean)
+    proxy_host = proxy_parsed.hostname or '127.0.0.1'
+    proxy_port = proxy_parsed.port or 7897
+
+    parsed = urllib.parse.urlsplit(url)
+    scheme = (parsed.scheme or '').lower()
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL does not contain a valid hostname")
+    port = parsed.port or (443 if scheme == 'https' else 80)
+    path = parsed.path or '/'
+    if parsed.query:
+        path = path + '?' + parsed.query
+
+    headers = {
+        'User-Agent': user_agent,
+        'Host': hostname if parsed.port is None else f'{hostname}:{parsed.port}',
+        'Accept': '*/*',
+        'Connection': 'close',
+    }
+
+    if scheme == 'https':
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(proxy_host, proxy_port, timeout=timeout, context=ctx)
+        conn.set_tunnel(hostname, port, headers={'User-Agent': user_agent})
+    else:
+        conn = http.client.HTTPConnection(proxy_host, proxy_port, timeout=timeout)
+
+    try:
+        conn.request('GET', path if scheme == 'https' else url, headers=headers)
+        resp = conn.getresponse()
+        header_map = {k.lower(): v for k, v in resp.getheaders()}
+        body = _read_capped(resp, FETCH_MAX_BYTES)
+        return resp.status, header_map, body
     finally:
         try:
             conn.close()
@@ -1384,10 +1456,24 @@ def probe_node_tcp(node: Dict[str, Any], timeout: float = NODE_PROBE_TIMEOUT_SEC
         return False, err
     except OSError as e:
         return False, str(e)[:120]
+
+    try:
+        ip_obj = ipaddress.ip_address(pinned)
+        if ip_obj.version == 6 and not has_ipv6_route():
+            return True, 'ipv6-skip'
+    except ValueError:
+        pass
+
     try:
         with socket.create_connection((pinned, port), timeout=timeout):
             return True, 'tcp-ok'
     except OSError as e:
+        if getattr(e, 'errno', None) in (errno.ENETUNREACH, 101):
+            try:
+                if ipaddress.ip_address(pinned).version == 6:
+                    return True, 'ipv6-skip'
+            except ValueError:
+                pass
         return False, str(e)[:120]
 
 
@@ -1545,23 +1631,66 @@ class SubscriptionEngine:
         safe_atomic_write(self.meta_file, content)
 
     def fetch_url(self, url: str, timeout: int = 15) -> str:
-        """Fetch subscription content with SSRF protection, no redirects, pinned IP, body cap."""
+        """Fetch subscription content with SSRF protection, no redirects, pinned IP, body cap,
+        and fallback to local proxy (e.g. 127.0.0.1:7897) when direct connection fails."""
         safe, err = is_safe_public_url(url)
         if not safe:
             raise ValueError(f"SSRF check failed: {err}")
 
-        status, headers, raw, _pinned = _http_get_pinned(
-            url,
-            timeout=timeout,
-            user_agent='ClashMeta/v1.18.0 mihomo/1.18.0',
-        )
-        if 300 <= status < 400:
-            raise ValueError(
-                f"HTTP {status} redirect refused (subscription fetches do not follow redirects)"
+        user_agent = 'ClashMeta/v1.18.0 mihomo/1.18.0'
+        proxy_env = os.environ.get('SUB_FETCH_PROXY', 'http://127.0.0.1:7897').strip()
+        proxy_disabled = proxy_env.lower() in ('none', 'off', '0', 'false', '')
+
+        direct_timeout = min(timeout, 8) if not proxy_disabled else timeout
+        direct_err: Optional[Exception] = None
+
+        try:
+            status, headers, raw, _pinned = _http_get_pinned(
+                url,
+                timeout=direct_timeout,
+                user_agent=user_agent,
             )
-        if status != 200:
-            raise ValueError(f"HTTP {status} fetching subscription")
-        return raw.decode('utf-8', errors='ignore')
+            if 300 <= status < 400:
+                raise ValueError(
+                    f"HTTP {status} redirect refused (subscription fetches do not follow redirects)"
+                )
+            if status != 200:
+                raise ValueError(f"HTTP {status} fetching subscription")
+            return raw.decode('utf-8', errors='ignore')
+        except Exception as e:
+            direct_err = e
+            if isinstance(e, ValueError) and 'redirect refused' in str(e):
+                raise
+
+        if not proxy_disabled and proxy_env:
+            _LOG.info(
+                "Subscription direct fetch failed for %s (%s); falling back to proxy %s",
+                url,
+                direct_err,
+                proxy_env,
+            )
+            try:
+                status, headers, raw = _http_get_via_proxy(
+                    url,
+                    proxy_url=proxy_env,
+                    timeout=timeout,
+                    user_agent=user_agent,
+                )
+                if 300 <= status < 400:
+                    raise ValueError(
+                        f"HTTP {status} redirect refused (subscription fetches do not follow redirects)"
+                    )
+                if status != 200:
+                    raise ValueError(f"HTTP {status} fetching subscription via proxy")
+                return raw.decode('utf-8', errors='ignore')
+            except Exception as proxy_err:
+                raise ValueError(
+                    f"Fetch failed (direct: {direct_err}; proxy fallback: {proxy_err})"
+                ) from proxy_err
+
+        if direct_err:
+            raise direct_err
+        raise ValueError("Fetch failed: unknown error")
 
     def add_subscription(
         self,
@@ -1574,6 +1703,7 @@ class SubscriptionEngine:
         skip_merge: bool = False,
         inject_local: bool = False,
         probe: bool = True,
+        target_group: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add a new subscription source to metadata and process nodes.
 
@@ -1607,18 +1737,29 @@ class SubscriptionEngine:
                 suffix += 1
 
             now_iso = datetime.now(timezone.utc).isoformat()
+            # target_group only matters when nodes are actually injected into
+            # local-nodes.yaml. skip_merge alone (no inject_local) writes nothing,
+            # so it must not force membership in the vps-import group.
+            if target_group is None and inject_local:
+                target_group = 'vps-import'
+            effective_filter = (
+                exclude_filter.strip()
+                if exclude_filter and str(exclude_filter).strip()
+                else DEFAULT_EXCLUDE_FILTER
+            )
             sub_record: Dict[str, Any] = {
                 'id': sub_id,
                 'name': name,
                 'type': sub_type,  # 'remote' or 'raw'
                 'url': url or '',
                 'enabled': enabled,
-                'exclude_filter': exclude_filter if exclude_filter is not None else DEFAULT_EXCLUDE_FILTER,
+                'exclude_filter': effective_filter,
                 'createdAt': now_iso,
                 'updatedAt': now_iso,
                 'node_count': 0,
                 'last_error': fetch_error,
                 'skip_merge': bool(skip_merge),
+                'target_group': target_group,
             }
 
             if sub_type == 'raw' or raw_content:
@@ -1644,6 +1785,7 @@ class SubscriptionEngine:
             inject_result = self._inject_alive_into_local_nodes(
                 pending_inject,
                 probe=probe,
+                target_group=target_group,
             )
             with SubscriptionLock(self.lock_file):
                 data = self.load_meta()
@@ -1678,6 +1820,7 @@ class SubscriptionEngine:
         refresh: bool = False,
         inject_local: Optional[bool] = None,
         probe: bool = True,
+        target_group: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update subscription metadata and optionally re-fetch/parse.
 
@@ -1693,6 +1836,7 @@ class SubscriptionEngine:
             if not sub:
                 return {'success': False, 'error': f"Subscription '{sub_id}' not found"}
 
+            old_sub_name = sub.get('name')
             if name is not None:
                 sub['name'] = name
             if url is not None:
@@ -1701,9 +1845,20 @@ class SubscriptionEngine:
                 sub['raw_content'] = raw_content
                 self.save_cached_content(sub_id, raw_content)
             if exclude_filter is not None:
-                sub['exclude_filter'] = exclude_filter
+                sub['exclude_filter'] = (
+                    exclude_filter.strip()
+                    if str(exclude_filter).strip()
+                    else DEFAULT_EXCLUDE_FILTER
+                )
+            if target_group is not None:
+                sub['target_group'] = target_group.strip() if str(target_group).strip() else None
             if enabled is not None:
                 sub['enabled'] = enabled
+
+            # A rename changes the injected name prefix; retract the old names
+            # so they do not survive in local-nodes.yaml as orphans.
+            if old_sub_name and sub.get('name') != old_sub_name:
+                self._retract_prefixed_nodes(old_sub_name)
 
             sub['updatedAt'] = datetime.now(timezone.utc).isoformat()
             self.save_meta(data)
@@ -1761,9 +1916,14 @@ class SubscriptionEngine:
 
         inject_result: Optional[Dict[str, Any]] = None
         if pending_inject:
+            # Legacy records predate target_group; a refresh that injects nodes
+            # must still land them in the whitelist group or they are dropped
+            # by apply-local-import's groups.vps-import contract.
+            target_group = (sub.get('target_group') if isinstance(sub, dict) else None) or 'vps-import'
             inject_result = self._inject_alive_into_local_nodes(
                 pending_inject,
                 probe=probe,
+                target_group=target_group,
             )
             with SubscriptionLock(self.lock_file):
                 data = self.load_meta()
@@ -1790,11 +1950,40 @@ class SubscriptionEngine:
             result['inject'] = inject_result
         return result
 
-    def delete_subscription(self, sub_id: str) -> Dict[str, Any]:
-        """Delete a subscription by id.
+    def _retract_prefixed_nodes(self, sub_name: Optional[str]) -> int:
+        """Drop ``[<sub_name>] ``-prefixed nodes from local-nodes.yaml and all groups.
 
-        Does not retract names already written to ``airports/local-nodes.yaml``.
-        Node-file cleanup is prune / denylist, not subscription delete.
+        Injected node names are namespaced by subscription name, so a deleted or
+        renamed source can have its names retracted without touching other
+        sources. Returns the number of proxies removed.
+        """
+        if not sub_name:
+            return 0
+        prefix = f"[{sub_name}] "
+        try:
+            doc = load_local_nodes_document(self.local_nodes_file)
+            kept = [p for p in doc['proxies'] if not str(p.get('name') or '').startswith(prefix)]
+            removed = len(doc['proxies']) - len(kept)
+            if not removed:
+                return 0
+            groups = {
+                gname: [n for n in names if not str(n).startswith(prefix)]
+                for gname, names in doc['groups'].items()
+            }
+            save_local_nodes_file(self.local_nodes_file, kept, groups=groups)
+            return removed
+        except Exception:
+            # A malformed local-nodes.yaml must not block metadata changes.
+            return 0
+
+    def delete_subscription(self, sub_id: str) -> Dict[str, Any]:
+        """Delete a subscription by id and retract its injected nodes.
+
+        Node names are namespaced by ``[<subscription name>] ``; removing the
+        subscription also retracts those names from ``airports/local-nodes.yaml``
+        (proxies and every group) so they stop flowing into the live VPS
+        ``config.yaml`` on the next apply. Existing denylist entries are left
+        untouched.
         """
         with SubscriptionLock(self.lock_file):
             data = self.load_meta()
@@ -1811,16 +2000,18 @@ class SubscriptionEngine:
                 except Exception:
                     pass
 
+            retracted = self._retract_prefixed_nodes(deleted.get('name'))
+
             data['subscriptions'] = subs
             self.save_meta(data)
             self.reconcile_merged()
-            return {'success': True, 'deleted': deleted}
+            return {'success': True, 'deleted': deleted, 'retracted': retracted}
 
     def prune_dead_nodes(
         self,
         batch_size: int = 15,
         max_workers: int = 5,
-        timeout_ms: int = 2500,
+        timeout_ms: int = 5000,
         batch_pause_sec: float = 0.3,
         max_candidates: int = 30,
         test_url: str = "http://www.gstatic.com/generate_204",
@@ -1828,6 +2019,7 @@ class SubscriptionEngine:
         controller_secret: Optional[str] = None,
         whitelist_prefixes: Tuple[str, ...] = ("GVPS-", "Aliyun-", "DIRECT", "REJECT"),
         apply_filter: bool = True,
+        max_retries: int = 2,
     ) -> Dict[str, Any]:
         """Perform throttled, chunked health-check across active nodes and filter dead nodes into denylist.
         
@@ -1897,15 +2089,19 @@ class SubscriptionEngine:
             q_name = urllib.parse.quote(name, safe="")
             q_url = urllib.parse.quote(test_url, safe="")
             delay_url = f"{controller_api}/proxies/{q_name}/delay?timeout={timeout_ms}&url={q_url}"
-            try:
-                preq = urllib.request.Request(delay_url, headers=headers)
-                with urllib.request.urlopen(preq, timeout=(timeout_ms / 1000.0) + 2.0) as presp:
-                    res_data = json.loads(presp.read().decode("utf-8", errors="ignore"))
-                    delay = res_data.get("delay")
-                    if delay is not None and isinstance(delay, (int, float)):
-                        return name, int(delay)
-            except Exception:
-                pass
+            attempts = max(1, max_retries)
+            for attempt in range(attempts):
+                try:
+                    preq = urllib.request.Request(delay_url, headers=headers)
+                    with urllib.request.urlopen(preq, timeout=(timeout_ms / 1000.0) + 2.0) as presp:
+                        res_data = json.loads(presp.read().decode("utf-8", errors="ignore"))
+                        delay = res_data.get("delay")
+                        if delay is not None and isinstance(delay, (int, float)):
+                            return name, int(delay)
+                except Exception:
+                    pass
+                if attempt + 1 < attempts:
+                    time.sleep(0.5)
             return name, None
 
         # 3. Process in chunks to prevent CPU / socket spikes
@@ -1962,6 +2158,7 @@ class SubscriptionEngine:
         skip_merge: bool = False,
         inject_local: bool = False,
         probe: bool = True,
+        target_group: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Import nodes from raw text (URIs or Base64).
 
@@ -1977,12 +2174,14 @@ class SubscriptionEngine:
             skip_merge=skip_merge,
             inject_local=inject_local,
             probe=probe,
+            target_group=target_group,
         )
 
     def _inject_alive_into_local_nodes(
         self,
         nodes: List[Dict[str, Any]],
         probe: bool = True,
+        target_group: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Merge alive nodes into airports/local-nodes.yaml.
 
@@ -2007,9 +2206,12 @@ class SubscriptionEngine:
 
         with SubscriptionLock(self.lock_file):
             disabled = load_disabled_nodes(self.disabled_file)
-            existing = load_local_nodes_file(self.local_nodes_file)
+            existing_doc = load_local_nodes_document(self.local_nodes_file)
+            existing = existing_doc['proxies']
+            groups = dict(existing_doc['groups'])
             by_name = {str(n.get('name')): n for n in existing}
             injected = 0
+            new_alive_names: List[str] = []
             for node in alive:
                 name = str(node.get('name') or '').strip()
                 if not name or name in disabled:
@@ -2017,7 +2219,20 @@ class SubscriptionEngine:
                 if name not in by_name:
                     injected += 1
                 by_name[name] = node
-            save_local_nodes_file(self.local_nodes_file, list(by_name.values()))
+                # Only include nodes that are routable/usable for target_group
+                # For example, if host has no IPv6, do not put ipv6-skip nodes into vps-import
+                if target_group == 'vps-import' and node.get('_probe') == 'ipv6-skip':
+                    continue
+                new_alive_names.append(name)
+
+            if target_group and new_alive_names:
+                grp_list = list(groups.get(target_group, []))
+                for nname in new_alive_names:
+                    if nname not in grp_list:
+                        grp_list.append(nname)
+                groups[target_group] = grp_list
+
+            save_local_nodes_file(self.local_nodes_file, list(by_name.values()), groups=groups)
 
         dead_names = [str(n.get('name') or '').strip() for n in dead if n.get('name')]
         return {
@@ -2303,10 +2518,7 @@ class SubscriptionEngine:
                 },
                 {
                     'name': GOOGLE_GROUP,
-                    'type': 'url-test',
-                    'url': 'https://accounts.google.com/',
-                    'interval': 300,
-                    'tolerance': 50,
+                    'type': 'select',
                     'proxies': google_members,
                 },
             ],
@@ -2464,6 +2676,8 @@ def main():
     parser.add_argument('--update', metavar='ID', help='Update/refresh a subscription by ID')
     parser.add_argument('--delete', metavar='ID', help='Delete a subscription by ID')
     parser.add_argument('--import-nodes', nargs=2, metavar=('NAME', 'TEXT'), help='Import nodes from raw text')
+    parser.add_argument('--target-group', metavar='GROUP', help='Target simple group in local-nodes.yaml (e.g. vps-import)')
+    parser.add_argument('--skip-merge', action='store_true', help='Set skip_merge=True to isolate nodes from VPS merged config')
     parser.add_argument('--reconcile', action='store_true', help='Reconcile and regenerate merged airport config')
     parser.add_argument('--fetch', action='store_true', help='Force re-fetching remote subscriptions during reconcile')
     parser.add_argument('--prune-dead', action='store_true', help='Mihomo :9090 delay prune (VPS controller). Panel toolkit uses prune_local_node_file instead.')
@@ -2491,7 +2705,13 @@ def main():
 
     if args.add:
         name, url = args.add
-        res = engine.add_subscription(name=name, url=url)
+        res = engine.add_subscription(
+            name=name,
+            url=url,
+            skip_merge=args.skip_merge,
+            target_group=args.target_group,
+            inject_local=bool(args.target_group or args.skip_merge),
+        )
         print(json.dumps(res, ensure_ascii=False, indent=2))
         sys.exit(0 if res.get('success') else 1)
 
@@ -2507,7 +2727,13 @@ def main():
 
     if args.import_nodes:
         name, text = args.import_nodes
-        res = engine.import_raw_nodes(name=name, raw_text=text)
+        res = engine.import_raw_nodes(
+            name=name,
+            raw_text=text,
+            skip_merge=args.skip_merge,
+            target_group=args.target_group,
+            inject_local=bool(args.target_group or args.skip_merge),
+        )
         print(json.dumps(res, ensure_ascii=False, indent=2))
         sys.exit(0 if res.get('success') else 1)
 

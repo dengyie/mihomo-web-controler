@@ -391,7 +391,15 @@
       const resp = await fetch(`${getApiBase()}/subscriptions`, {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ name, url, exclude_filter: excludeFilter, skip_merge: true, inject_local: true, probe: true }),
+        body: JSON.stringify({
+          name,
+          url,
+          exclude_filter: excludeFilter ? excludeFilter.trim() : undefined,
+          skip_merge: true,
+          inject_local: true,
+          target_group: 'vps-import',
+          probe: true,
+        }),
       });
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);
@@ -423,7 +431,14 @@
       const resp = await fetch(`${getApiBase()}/subscriptions/import-nodes`, {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ name, content, skip_merge: true, inject_local: true, probe: true }),
+        body: JSON.stringify({
+          name,
+          content,
+          skip_merge: true,
+          inject_local: true,
+          target_group: 'vps-import',
+          probe: true,
+        }),
       });
       const json = await resp.json();
       if (!resp.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${resp.status}`);

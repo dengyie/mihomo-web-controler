@@ -477,6 +477,69 @@ class GatewayEndpointsTests(unittest.TestCase):
         names = [p['name'] for p in local['proxies']]
         self.assertIn('[InjectHTTP] Inject-HTTP', names)
 
+    def test_http_import_skip_merge_without_injection_stays_out_of_vps_import(self):
+        # skip_merge=True + inject_local=False (pure isolation, no injection)
+        # must NOT be coerced into vps-import — that group feeds the live VPS
+        # config and would leak an isolated subscription into production egress.
+        ss = 'ss://YWVzLTEyOC1nY206cA==@10.20.30.40:8388#Isolated'
+        h = _FakeRequestHarness(
+            self.gw,
+            'POST',
+            '/panel/api/subscriptions/import-nodes',
+            body=json.dumps({'name': 'IsolatedSub', 'text': ss, 'probe': False, 'inject_local': False, 'skip_merge': True}),
+            auth_token=self.token,
+        )
+        self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 200)
+        sm_mod = self.gw.get_sub_manager()
+        engine = sm_mod.SubscriptionEngine(root=self.clash_dir)
+        sub = next(s for s in engine.list_subscriptions() if s['name'] == 'IsolatedSub')
+        self.assertNotIn(sub.get('target_group'), ('vps-import',))
+        local_path = self.clash_dir / 'airports' / 'local-nodes.yaml'
+        if local_path.exists():
+            local = yaml.safe_load(local_path.read_text())
+            vps = local.get('groups', {}).get('vps-import', [])
+            self.assertEqual(vps, [])
+            self.assertNotIn('[IsolatedSub] Isolated', [p['name'] for p in local.get('proxies', [])])
+        merged_path = self.clash_dir / 'airports' / 'airport-merged-sub.yaml'
+        merged = yaml.safe_load(merged_path.read_text()) if merged_path.exists() else {}
+        self.assertEqual([p['name'] for p in (merged.get('proxies') or [])], [])
+
+    def test_http_delete_subscription_retracts_injected_nodes(self):
+        ss = 'ss://YWVzLTEyOC1nY206cA==@8.8.4.4:8388#DelRetract'
+        sm_mod = self.gw.get_sub_manager()
+
+        def fake_probe(nodes, timeout=1.5, max_workers=8, keep_ssrf=False):
+            return list(nodes), []
+
+        with mock.patch.object(sm_mod, 'probe_nodes', side_effect=fake_probe):
+            h = _FakeRequestHarness(
+                self.gw,
+                'POST',
+                '/panel/api/subscriptions/import-nodes',
+                body=json.dumps({'name': 'DelMe', 'text': ss}),
+                auth_token=self.token,
+            )
+            self.gw.Handler._dispatch(h.handler, 'POST')
+        self.assertEqual(h.response_status, 200)
+        engine = sm_mod.SubscriptionEngine(root=self.clash_dir)
+        sub = next(s for s in engine.list_subscriptions() if s['name'] == 'DelMe')
+        local_before = yaml.safe_load((self.clash_dir / 'airports' / 'local-nodes.yaml').read_text())
+        self.assertIn('[DelMe] DelRetract', [p['name'] for p in local_before['proxies']])
+
+        h2 = _FakeRequestHarness(
+            self.gw,
+            'DELETE',
+            f'/panel/api/subscriptions/{sub["id"]}',
+            auth_token=self.token,
+        )
+        self.gw.Handler._dispatch(h2.handler, 'DELETE')
+        self.assertEqual(h2.response_status, 200)
+        local_after = yaml.safe_load((self.clash_dir / 'airports' / 'local-nodes.yaml').read_text())
+        names_after = [p['name'] for p in local_after['proxies']]
+        self.assertNotIn('[DelMe] DelRetract', names_after)
+        self.assertEqual(local_after['groups'].get('vps-import', []), [])
+
     def test_prune_get_is_rejected(self):
         h = _FakeRequestHarness(self.gw, 'GET', '/panel/api/diagnostics/prune-dead-nodes', auth_token=self.token)
         self.gw.Handler._dispatch(h.handler, 'GET')

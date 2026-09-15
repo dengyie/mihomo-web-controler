@@ -9,6 +9,7 @@ a changed live config is reloaded once through 9090.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import urllib.request
@@ -20,6 +21,27 @@ import yaml
 ROOT = Path(os.environ.get('CLASH_ROOT', '/personal/clash')).resolve()
 GROUP = '🌐 本机导入'
 VPS_GROUP = 'vps-import'
+THIRD_PARTY_PREFIXES = tuple(
+    p.strip() for p in os.environ.get('THIRD_PARTY_PREFIXES', 'SUB-,JX-,GL-,JS-,KQ-').split(',') if p.strip()
+)
+BLOCKED_NAMES = {'续费备用节点', 'PXED-BRIDGE'}
+
+
+def is_third_party_or_blocked(name: str) -> bool:
+    if not name:
+        return False
+    if name in BLOCKED_NAMES:
+        return True
+    return any(name.startswith(pfx) for pfx in THIRD_PARTY_PREFIXES)
+
+
+def is_auto_excluded(name: str) -> bool:
+    if not name:
+        return True
+    low = name.lower()
+    if low.startswith('bk-'):
+        return True
+    return any(k in low for k in ('azure', 'reverse', '17897', 'home-win', 'pxed-bridge'))
 
 
 def resolve_airport(root: Path) -> Path:
@@ -107,38 +129,101 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
 
     groups = data.setdefault('proxy-groups', [])
     group = next((item for item in groups if item.get('name') == GROUP), None)
-    if group is None:
-        group = {'name': GROUP, 'type': 'select', 'proxies': []}
-        groups.append(group)
     all_names = {
         proxy.get('name')
         for proxy in data.get('proxies') or []
         if isinstance(proxy, dict)
     }
-    group['proxies'] = [
-        proxy.get('name')
-        for proxy in imported
-        if proxy.get('name') not in disabled and proxy.get('name') in all_names
-    ]
+    if group is not None:
+        group['proxies'] = [
+            proxy.get('name')
+            for proxy in imported
+            if proxy.get('name') not in disabled and proxy.get('name') in all_names
+        ]
+    else:
+        for gname in ('PROXY', 'AUTO'):
+            grp = next((item for item in groups if item.get('name') == gname), None)
+            if grp is not None:
+                current_members = list(grp.get('proxies') or [])
+                for proxy in imported:
+                    pname = proxy.get('name')
+                    if pname and pname not in disabled and pname in all_names and pname not in current_members:
+                        if gname == 'AUTO' and is_auto_excluded(pname):
+                            continue
+                        current_members.append(pname)
+                grp['proxies'] = current_members
 
     kept = []
     removed = 0
+    # Injected subscription nodes carry a ``[<sub>] `` name prefix. Any one that
+    # is present in the live config but no longer in the active vps-import
+    # whitelist is an orphan (deleted/renamed/refreshed-away subscription); drop
+    # it from the proxies list so the delete actually propagates to the live
+    # config instead of persisting in PROXY across reloads.
+    imported_names = {p.get('name') for p in imported if isinstance(p, dict) and p.get('name')}
+    injected_prefix = re.compile(r'^\[[^\]]+\] ')
     for proxy in data.get('proxies') or []:
-        if isinstance(proxy, dict) and proxy.get('name') in disabled:
+        if not isinstance(proxy, dict):
+            continue
+        p_name = proxy.get('name')
+        p_name = p_name if isinstance(p_name, str) else (str(p_name) if p_name is not None else '')
+        orphan = bool(injected_prefix.match(p_name)) and p_name not in imported_names and p_name not in disabled
+        if not p_name or p_name in disabled or is_third_party_or_blocked(p_name) or orphan:
             removed += 1
         else:
             kept.append(proxy)
     data['proxies'] = kept
+
+    kept_name_set = {p['name'] for p in kept if isinstance(p, dict) and p.get('name')}
+    group_name_set = {g.get('name') for g in groups if isinstance(g, dict) and g.get('name')}
+    valid_references = kept_name_set | group_name_set | {'DIRECT', 'REJECT', 'GLOBAL'}
+
     for item in data.get('proxy-groups') or []:
         if isinstance(item, dict):
-            item['proxies'] = [
+            g_name = item.get('name')
+            cleaned = [
                 name for name in (item.get('proxies') or [])
-                if name not in disabled
+                if name in valid_references and name not in disabled and not is_third_party_or_blocked(name)
             ]
+            if g_name == 'AUTO':
+                cleaned = [name for name in cleaned if not is_auto_excluded(name)]
+            elif g_name == 'PROXY':
+                cleaned = [name for name in cleaned if not any(k in name.lower() for k in ('reverse', '17897', 'pxed-bridge'))]
+            elif g_name == 'cpa-clean-egress':
+                cleaned = [name for name in cleaned if not any(k in name.lower() for k in ('reverse', '17897'))]
+                if '🏠home-win-CF' in valid_references and '🏠home-win-CF' not in cleaned:
+                    cleaned.insert(0, '🏠home-win-CF')
+                elif '🏠home-win-CF' in cleaned and cleaned[0] != '🏠home-win-CF':
+                    cleaned.remove('🏠home-win-CF')
+                    cleaned.insert(0, '🏠home-win-CF')
+            if not cleaned:
+                cleaned = ['PROXY'] if 'PROXY' in valid_references and g_name != 'PROXY' else ['DIRECT']
+            item['proxies'] = cleaned
     return data, len(added), removed
 
 
 def reload_live() -> int:
+    try:
+        try:
+            from cluster_reload import reload_cluster
+        except ImportError:
+            clash_dir = str(Path(__file__).resolve().parent)
+            if clash_dir not in sys.path:
+                sys.path.insert(0, clash_dir)
+            from cluster_reload import reload_cluster
+
+        res = reload_cluster(config_path=ROOT / 'config.yaml')
+        loc = res['local']
+        rem = res['remote']
+        print(
+            f"cluster_reload: local={loc.get('status')}({loc.get('node')}), "
+            f"remote={rem.get('status')}({rem.get('peer_node')}@{rem.get('peer_ip')})"
+        )
+        if not loc.get('success'):
+            raise RuntimeError(f"Local reload failed: {loc.get('error')}")
+        return loc.get('status', 204)
+    except ImportError:
+        pass
     secret_file = ROOT / '.controller-secret'
     secret = secret_file.read_text().strip()
     req = urllib.request.Request(

@@ -44,8 +44,10 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 _reconciler_mtime = 0
 _reconciler_module = None
+_reconciler_lock = threading.Lock()
 _sub_manager_mtime = 0
 _sub_manager_module = None
+_sub_manager_lock = threading.Lock()
 
 
 class SubManagerLoadError(RuntimeError):
@@ -57,7 +59,11 @@ def get_sub_manager():
     if not SUBSCRIPTION_MANAGER_PATH.exists():
         return None
     current_mtime = os.path.getmtime(SUBSCRIPTION_MANAGER_PATH)
-    if _sub_manager_module is None or current_mtime > _sub_manager_mtime:
+    if _sub_manager_module is not None and current_mtime <= _sub_manager_mtime:
+        return _sub_manager_module
+    with _sub_manager_lock:
+        if _sub_manager_module is not None and current_mtime <= _sub_manager_mtime:
+            return _sub_manager_module
         spec = importlib.util.spec_from_file_location("subscription_manager", str(SUBSCRIPTION_MANAGER_PATH))
         if spec is None or spec.loader is None:
             raise SubManagerLoadError(f"Cannot create a module spec/loader for {SUBSCRIPTION_MANAGER_PATH}")
@@ -72,7 +78,7 @@ def get_sub_manager():
             return _sub_manager_module
         _sub_manager_module = mod
         _sub_manager_mtime = current_mtime
-    return _sub_manager_module
+        return _sub_manager_module
 
 
 def is_pxed_host() -> bool:
@@ -146,7 +152,11 @@ def get_reconciler():
     if not RECONCILER_PATH.exists():
         return None
     current_mtime = os.path.getmtime(RECONCILER_PATH)
-    if _reconciler_module is None or current_mtime > _reconciler_mtime:
+    if _reconciler_module is not None and current_mtime <= _reconciler_mtime:
+        return _reconciler_module
+    with _reconciler_lock:
+        if _reconciler_module is not None and current_mtime <= _reconciler_mtime:
+            return _reconciler_module
         spec = importlib.util.spec_from_file_location("rules_reconciler", str(RECONCILER_PATH))
         if spec is None or spec.loader is None:
             raise ReconcilerLoadError(
@@ -169,7 +179,7 @@ def get_reconciler():
             return _reconciler_module
         _reconciler_module = mod
         _reconciler_mtime = current_mtime
-    return _reconciler_module
+        return _reconciler_module
 
 
 def panel_password():
@@ -663,9 +673,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {'status': 'error', 'error': 'Missing raw text / content for import'})
                 return
             exclude_filter = payload.get('exclude_filter')
+            if exclude_filter is not None and not str(exclude_filter).strip():
+                exclude_filter = None
             skip_merge = payload.get('skip_merge', True)
             inject_local = payload.get('inject_local', True)
             probe = payload.get('probe', True)
+            target_group = payload.get('target_group')
             res = engine.import_raw_nodes(
                 name=name,
                 raw_text=raw_text,
@@ -673,6 +686,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 skip_merge=bool(skip_merge),
                 inject_local=bool(inject_local),
                 probe=bool(probe),
+                target_group=target_group,
             )
             if res.get('success'):
                 cache_invalidate('local')
@@ -691,10 +705,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raw_content = payload.get('raw_content') or payload.get('content')
             sub_type = payload.get('type', 'remote' if url else 'raw')
             exclude_filter = payload.get('exclude_filter')
+            if exclude_filter is not None and not str(exclude_filter).strip():
+                exclude_filter = None
             enabled = payload.get('enabled', True)
             skip_merge = payload.get('skip_merge', True)
             inject_local = payload.get('inject_local', True)
             probe = payload.get('probe', True)
+            target_group = payload.get('target_group')
 
             res = engine.add_subscription(
                 name=name,
@@ -706,6 +723,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 skip_merge=bool(skip_merge),
                 inject_local=bool(inject_local),
                 probe=bool(probe),
+                target_group=target_group,
             )
             if res.get('success'):
                 cache_invalidate('local')
@@ -792,6 +810,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             exclude_filter = payload.get('exclude_filter')
             enabled = payload.get('enabled')
             refresh = payload.get('refresh', False)
+            target_group = payload.get('target_group')
 
             res = engine.update_subscription(
                 sub_id=sub_id,
@@ -801,6 +820,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 exclude_filter=exclude_filter,
                 enabled=enabled,
                 refresh=refresh,
+                target_group=target_group,
             )
             if res.get('success'):
                 cache_invalidate('local')
@@ -1297,9 +1317,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # header subset. Forcing identity keeps cached bytes self-describing.
         headers.pop('Accept-Encoding', None)
         headers['Accept-Encoding'] = 'identity'
-        headers['Host'] = '127.0.0.1:9090'
+        headers['Host'] = f'{UPSTREAM_HOST}:{UPSTREAM_PORT}'
         controller_secret = ''
-        secret_file = Path('/personal/clash/.controller-secret')
+        secret_file = CLASH_ROOT / '.controller-secret'
         if secret_file.exists():
             controller_secret = secret_file.read_text().strip()
         headers['Authorization'] = 'Bearer ' + controller_secret
@@ -1358,12 +1378,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             path = rel_path[len('/panel/api'):]
             controller_secret = ''
-            secret_file = Path('/personal/clash/.controller-secret')
+            secret_file = CLASH_ROOT / '.controller-secret'
             if secret_file.exists():
                 controller_secret = secret_file.read_text().strip()
             upstream_query = {'token': controller_secret}
             lines = [f'GET {path or "/"}?{urlencode(upstream_query)} HTTP/1.1',
-                     'Host: 127.0.0.1:9090',
+                     f'Host: {UPSTREAM_HOST}:{UPSTREAM_PORT}',
                      'Connection: Upgrade',
                      'Upgrade: websocket',
                      'Authorization: Bearer ' + controller_secret]
