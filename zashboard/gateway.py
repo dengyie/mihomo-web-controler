@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import hashlib
 import http.client
 import http.server
 import importlib.util
@@ -97,6 +98,26 @@ def _etag_matches(if_none_match: str, digest: str) -> bool:
         if token.startswith('W/') and token[2:].strip() in wanted:
             return True
     return False
+
+
+def _backfill_edit_payload(payload: dict, existing: list, rule_id: str) -> dict:
+    """PUT merges a web-form payload into the stored entry.
+
+    The UI form only edits type/payload/target; fields the form does not know
+    about (``params``, e.g. added via API or a later YAML edit) must carry over
+    to the new entry instead of being silently dropped. Poisoned placeholder
+    values ('' or whitespace) are skipped so they do not clobber a real value.
+    """
+    entry = next((r for r in existing if r.get('id') == rule_id), None)
+    if entry is None:
+        return payload
+    for field in ('params',):
+        if field in payload:
+            continue
+        value = str(entry.get(field) or '')
+        if value.strip():
+            payload[field] = entry[field]
+    return payload
 
 
 def get_local_ip() -> str:
@@ -1221,7 +1242,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self.send_json(400, {'error': 'Payload must be a JSON object'})
                 return
+            # PUT is an update, not an upsert: editing a rule that was already
+            # deleted must surface a 404 instead of silently recreating it.
+            # (Best-effort guard: the read here and the write below are not
+            # atomic, but this panel has a single operator, so a racing delete
+            # landing in the window is not a concern.)
+            existing = reconciler.load_user_rules().get('rules', [])
+            if not any(r.get('id') == rule_id for r in existing):
+                self.send_json(404, {'error': f"Rule ID '{rule_id}' not found"})
+                return
             payload['id'] = rule_id
+            payload = _backfill_edit_payload(payload, existing, rule_id)
             res = reconciler.add_or_update_rule(payload)
             self.send_json(200 if res.get('success') else 400, res)
             return
@@ -1679,11 +1710,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self.send_error(404)
             return
+        if target.name == 'index.html':
+            self.send_response(200)
+            self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(data)
+            return
+        # The shipped assets are content-addressed (hashed filename or
+        # ?v=<sha256> cache-buster). Without an explicit header, Cloudflare
+        # edge-caches js/css for its default 4h TTL, so a just-deployed
+        # bundle can keep being served stale for hours ("button disappeared"
+        # class of bugs). Pin assets to revalidate-anytime: correct by
+        # construction and cheap via ETag / If-None-Match.
+        # ETag is a content hash (not mtime+size) so identical bytes revalidate
+        # identically across the tebi/pxed NFS pair, and _etag_matches() below
+        # tolerates weak (W/"...") / quoted / comma-list validators the way
+        # browsers and intermediaries actually send them.
+        digest = hashlib.sha256(data).hexdigest()
+        etag = '"%s"' % digest
+        inm = (self.headers.get('If-None-Match') or '').strip()
+        if _etag_matches(inm, digest):
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Cache-Control', 'private, no-cache, must-revalidate')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
         self.send_header('Content-Length', str(len(data)))
-        if target.name == 'index.html':
-            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+        self.send_header('ETag', etag)
+        self.send_header('Cache-Control', 'private, no-cache, must-revalidate')
         self.end_headers()
         if not head_only:
             self.wfile.write(data)

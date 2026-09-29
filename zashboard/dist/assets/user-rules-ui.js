@@ -19,6 +19,7 @@
     globe: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418"/>',
     link: '<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"/>',
     plus: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>',
+    pencil: '<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/>',
     trash: '<path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/>',
     pause: '<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5"/>',
     play: '<path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z"/>',
@@ -91,6 +92,7 @@
     loading: false,
     submitting: false,
     viewMode: 'list', // 'list' | 'add'
+    editingId: null, // 正在修改的规则 id（null = 新增）
     form: {
       type: 'DOMAIN-SUFFIX',
       payload: '',
@@ -1253,6 +1255,25 @@
   // ==========================================
   // 规则管理页模态注入 (保留原有用户规则功能)
   // ==========================================
+  let topBarMissCount = 0;
+
+  function findRulesTopBar() {
+    // Multi-level anchor fallback: the upstream header renders either
+    // `flex gap-2 p-2` (wide) or `flex flex-col gap-2 p-2` (narrow); try
+    // the specific combos first, then any p-2 header container.
+    const candidates = [
+      '.flex.gap-2.p-2',
+      '.flex.flex-col.gap-2.p-2',
+      '.base-container',
+      '[class*="gap-2"][class*="p-2"]',
+    ];
+    for (const sel of candidates) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
   function injectRulesPageButton() {
     const isRulesPage = (location.hash || '').startsWith('#/rules');
     const existingBtn = document.getElementById('user-rules-top-action-btn');
@@ -1262,8 +1283,16 @@
     }
     if (existingBtn) return;
 
-    const topBar = document.querySelector('.flex.gap-2.p-2');
-    if (!topBar) return;
+    const topBar = findRulesTopBar();
+    if (!topBar) {
+      // Never fail silently: the 500ms loop retries, but if the upstream
+      // header changes shape we need to hear about it in the console.
+      topBarMissCount += 1;
+      if (topBarMissCount === 1 || topBarMissCount % 10 === 0) {
+        console.error('[user-rules-ui] rules top-bar anchor not found (attempt ' + topBarMissCount + '); button will not inject yet.');
+      }
+      return;
+    }
 
     const btn = document.createElement('button');
     btn.id = 'user-rules-top-action-btn';
@@ -1271,6 +1300,9 @@
     btn.innerHTML = `${nativeIcon('shield', 'h-3.5 w-3.5')} 自定义规则`;
     btn.addEventListener('click', openUserRulesModal);
     topBar.appendChild(btn);
+    // Reset the miss counter: once injected, a later recovery attempt that
+    // fails again should log from attempt 1, not from a stale high count.
+    topBarMissCount = 0;
   }
 
   function openUserRulesModal() {
@@ -1353,25 +1385,32 @@
 
     try {
       showToast('正在写入权威源并执行语法校验与热重载...', 'info');
-      const resp = await fetch(`${getApiBase()}/user-rules`, {
-        method: 'POST',
-        headers: {
-          ...getAuthHeaders(),
-          'Content-Type': 'application/json',
+      const editingId = userRulesState.editingId;
+      const resp = await fetch(
+        editingId ? `${getApiBase()}/user-rules/${encodeURIComponent(editingId)}` : `${getApiBase()}/user-rules`,
+        {
+          method: editingId ? 'PUT' : 'POST',
+          headers: {
+            ...getAuthHeaders(),
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            type: type || 'DOMAIN-SUFFIX',
+            payload: cleanPayload,
+            target: target,
+            // Keep the saved enabled state: editing a disabled rule must not
+            // silently re-enable it (PUT body replaces the whole rule entry).
+            enabled: userRulesState.form.enabled !== false,
+          }),
         },
-        body: JSON.stringify({
-          type: type || 'DOMAIN-SUFFIX',
-          payload: cleanPayload,
-          target: target,
-          enabled: true,
-        }),
-      });
+      );
       const json = await resp.json();
       if (!resp.ok || !json.success) {
         throw new Error(json.error || (json.reconcile && json.reconcile.error) || `HTTP ${resp.status}`);
       }
-      showToast('✅ 规则保存成功并已热重载生效！', 'success');
+      showToast(editingId ? '✅ 规则已修改并热重载生效！' : '✅ 规则保存成功并已热重载生效！', 'success');
       userRulesState.form.payload = '';
+      userRulesState.editingId = null;
       userRulesState.viewMode = 'list';
       await fetchUserRules();
     } catch (err) {
@@ -1435,7 +1474,7 @@
             <button class="btn btn-ghost btn-xs btn-circle" id="btn-back-to-list" ${isSubmitting ? 'disabled' : ''}>
               ${nativeIcon('arrow-left', 'h-4 w-4')}
             </button>
-            <span class="font-bold text-sm">新增自定义规则</span>
+            <span class="font-bold text-sm">${userRulesState.editingId ? '修改自定义规则' : '新增自定义规则'}</span>
           </div>
           <span class="text-xs text-base-content/40 font-mono">${escapeHtml(activeBackendUuid.replace('backend-', '').replace('-default', ''))}</span>
         </div>
@@ -1488,10 +1527,12 @@
 
       container.querySelector('#btn-back-to-list')?.addEventListener('click', () => {
         userRulesState.viewMode = 'list';
+        userRulesState.editingId = null;
         renderUserRulesModal();
       });
       container.querySelector('#btn-cancel-add')?.addEventListener('click', () => {
         userRulesState.viewMode = 'list';
+        userRulesState.editingId = null;
         renderUserRulesModal();
       });
       container.querySelector('#btn-submit-add')?.addEventListener('click', () => {
@@ -1535,12 +1576,15 @@
             ${rules.length === 0 ? `
               <tr><td colspan="5" class="text-center py-6 text-base-content/40">暂无自定义规则，点击右上角 “+ 新增规则” 添加</td></tr>
             ` : rules.map(r => `
-              <tr class="hover:bg-base-200/40 font-mono">
-                <td class="font-bold text-primary">${escapeHtml(r.type)}</td>
+              <tr class="hover:bg-base-200/40 font-mono ${r.enabled === false ? 'opacity-50' : ''}">
+                <td class="font-bold text-primary">${escapeHtml(r.type)}${r.enabled === false ? ` <span class="badge badge-sm badge-warning badge-outline">已停用</span>` : ''}</td>
                 <td class="max-w-[200px] truncate" title="${escapeHtml(r.payload)}">${escapeHtml(r.payload)}</td>
                 <td><span class="badge badge-sm badge-ghost">${escapeHtml(r.target)}</span></td>
                 <td class="text-base-content/50 font-sans text-[11px]">${escapeHtml(r.updatedAt ? r.updatedAt.split('T')[0] : 'UI')}</td>
                 <td class="text-right font-sans">
+                  <button class="btn btn-ghost btn-xs text-info p-1 hover:bg-info/10 btn-edit-user-rule" data-id="${escapeHtml(r.id)}" data-type="${escapeHtml(r.type || 'DOMAIN-SUFFIX')}" data-payload="${escapeHtml(r.payload)}" data-target="${escapeHtml(r.target || 'DIRECT')}" data-enabled="${r.enabled === false ? 'false' : 'true'}" title="修改规则" ${isBusy ? 'disabled' : ''}>
+                    ${nativeIcon('pencil', 'h-3.5 w-3.5')}
+                  </button>
                   <button class="btn btn-ghost btn-xs text-error p-1 hover:bg-error/10 btn-del-user-rule" data-id="${escapeHtml(r.id)}" data-payload="${escapeHtml(r.payload)}" title="删除规则" ${isBusy ? 'disabled' : ''}>
                     ${nativeIcon('trash', 'h-3.5 w-3.5')}
                   </button>
@@ -1554,9 +1598,24 @@
 
     container.querySelector('#btn-go-add')?.addEventListener('click', () => {
       userRulesState.viewMode = 'add';
+      userRulesState.editingId = null;
+      userRulesState.form = { type: 'DOMAIN-SUFFIX', payload: '', target: userRulesState.targets[0] || 'DIRECT', enabled: true };
       renderUserRulesModal();
     });
     container.querySelector('#btn-refresh-user-rules')?.addEventListener('click', fetchUserRules);
+    container.querySelectorAll('.btn-edit-user-rule').forEach(btn => {
+      btn.addEventListener('click', () => {
+        userRulesState.viewMode = 'add';
+        userRulesState.editingId = btn.dataset.id;
+        userRulesState.form = {
+          type: btn.dataset.type || 'DOMAIN-SUFFIX',
+          payload: btn.dataset.payload || '',
+          target: btn.dataset.target || 'DIRECT',
+          enabled: btn.dataset.enabled !== 'false',
+        };
+        renderUserRulesModal();
+      });
+    });
     container.querySelectorAll('.btn-del-user-rule').forEach(btn => {
       btn.addEventListener('click', () => {
         deleteUserRule(btn.dataset.id, btn.dataset.payload);

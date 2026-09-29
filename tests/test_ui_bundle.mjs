@@ -109,6 +109,43 @@ class MockElement {
       child.id = m[1];
       this.appendChild(child);
     }
+    // Materialize class-bearing children so class-based selectors (e.g.
+    // .btn-edit-user-rule) can be driven the same way as by id. Parse each
+    // element tag separately and scope data-* to that tag only, so multi-row
+    // lists keep per-row datasets instead of merging every row's data-*
+    // into a single shared element.
+    const tagRe = /<([a-zA-Z][\w-]*)((?:\s+[^>]*?)?)>/g;
+    let tm;
+    while ((tm = tagRe.exec(String(val))) !== null) {
+      const tagName = tm[1].toLowerCase();
+      const attrs = tm[2] || '';
+      const clsM = attrs.match(/class=["']([^"']+)["']/);
+      if (!clsM) continue;
+      const child = new MockElement(tagName === 'tr' ? 'tr' : 'div');
+      child.className = clsM[1];
+      const dataRe = /data-([\w-]+)=["']([^"']*)["']/g;
+      let dm;
+      while ((dm = dataRe.exec(attrs)) !== null) {
+        child.dataset[dm[1]] = dm[2];
+      }
+      this.appendChild(child);
+    }
+    // Materialize input/select values so form flows read the same values a
+    // real browser would (e.g. updatePreview() on submit reads .value).
+    const inputRe = /<input\b[^>]*\bid=["']([^"']+)["'][^>]*\bvalue=["']([^"']*)["']/g;
+    let im;
+    while ((im = inputRe.exec(String(val))) !== null) {
+      const el = this.children.find((c) => c.id === im[1]);
+      if (el) el.value = im[2];
+    }
+    const selectRe = /<select\b[^>]*\bid=["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/g;
+    let sm;
+    while ((sm = selectRe.exec(String(val))) !== null) {
+      const options = [...sm[2].matchAll(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*(selected)?/g)];
+      const chosen = options.find((o) => o[2] !== undefined) || options[0];
+      const el = this.children.find((c) => c.id === sm[1]);
+      if (el) el.value = chosen ? chosen[1] : '';
+    }
   }
 
   get innerHTML() {
@@ -253,7 +290,14 @@ global.localStorage = {
     this._store.set(k, String(v));
   },
 };
-global.fetch = async (url) => {
+global.fetchCalls = [];
+global.fetch = async (url, options = {}) => {
+  const method = (options.method || 'GET').toUpperCase();
+  let body = null;
+  if (options.body) {
+    try { body = JSON.parse(options.body); } catch { body = options.body; }
+  }
+  global.fetchCalls.push({ url, method, body });
   if (url.includes('/diagnostics/egress-ip')) {
     return {
       ok: true,
@@ -295,12 +339,40 @@ global.fetch = async (url) => {
     };
   }
   if (url.includes('/user-rules')) {
+    if (method === 'PUT' || method === 'POST' || method === 'DELETE') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok', data: { rules: [] } }),
+      };
+    }
     return {
       ok: true,
       status: 200,
       json: async () => ({
         status: 'ok',
-        data: { rules: [] },
+        data: {
+          rules: [
+            {
+              id: 'user-r1',
+              type: 'DOMAIN-SUFFIX',
+              payload: 'edit-me.example.com',
+              target: 'PROXY',
+              enabled: false,
+              updatedAt: '2026-09-29T00:00:00Z',
+            },
+            {
+              id: 'user-r2',
+              type: 'IP-CIDR',
+              payload: '10.2.0.0/16',
+              target: 'REJECT',
+              enabled: true,
+              params: '!no-resolve',
+              updatedAt: '2026-09-28T00:00:00Z',
+            },
+          ],
+          available_targets: ['DIRECT', 'PROXY', 'REJECT', 'GLOBAL'],
+        },
       }),
     };
   }
@@ -383,6 +455,57 @@ assert.ok(modalContent.querySelector('#btn-submit-add'), 'Submit button exists i
 modalContent.querySelector('#btn-cancel-add').listeners.get('click')?.[0]?.();
 assert.ok(modalContent.querySelector('#btn-go-add'), 'Returned to list view after cancel');
 
-console.log('✅ #/rules Modal CRUD Controls (Add/List/Submit) verification passed');
+// Let the background fetchUserRules resolve and re-render the row list
+// (the edit/delete row buttons only exist once rules are rendered).
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+// [5] Edit flow: one seeded rule -> edit button opens add mode prefilled,
+// and the form header switches to the edit title.
+const editBtn = modalContent.querySelectorAll('.btn-edit-user-rule')[0];
+assert.ok(editBtn, 'Edit (修改规则) button exists per rule row in list view');
+assert.strictEqual(editBtn.dataset.id, 'user-r1', 'Edit button carries rule id');
+editBtn.listeners.get('click')?.[0]?.({
+  preventDefault: () => {},
+  stopPropagation: () => {},
+  target: editBtn,
+});
+assert.ok(modalContent.querySelector('#modal-rule-payload'), 'Edit mode opens add payload input');
+assert.ok(modalContent.querySelector('#btn-submit-add'), 'Edit mode retains submit button');
+assert.ok(modalContent.innerHTML.includes('修改自定义规则'), 'Edit mode shows 修改自定义规则 title');
+assert.ok(modalContent.innerHTML.includes('edit-me.example.com'), 'Edit form prefilled with rule payload');
+
+// [6] PUT contract: submitting the edit must send PUT to /user-rules/<id>
+// with the original enabled state preserved (seeded rule is enabled:false).
+global.fetchCalls.length = 0;
+modalContent.querySelector('#btn-submit-add').listeners.get('click')?.[0]?.();
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+const putCall = global.fetchCalls.find((c) => (c.method || 'GET').toUpperCase() === 'PUT' && c.url.includes('/user-rules/'));
+assert.ok(putCall, 'Edit save issues PUT to /user-rules/<id>');
+assert.ok(putCall.url.includes('/user-rules/user-r1'), 'PUT goes to the edited rule id');
+assert.ok(putCall.body && putCall.body.enabled === false, 'PUT keeps enabled false for a disabled rule');
+assert.ok(putCall.body && putCall.body.payload === 'edit-me.example.com', 'PUT carries the edited payload');
+
+// Back to list and confirm list still renders
+modalContent.querySelector('#btn-back-to-list').listeners.get('click')?.[0]?.();
+assert.ok(modalContent.querySelector('#btn-go-add'), 'Returned to list view after edit cancel');
+
+// Cancel must clear editingId: re-opening go-add should yield the add title,
+// not the previous edit title.
+modalContent.querySelector('#btn-go-add').listeners.get('click')?.[0]?.();
+assert.ok(modalContent.innerHTML.includes('新增自定义规则'), 'After cancel, go-add shows the add title (editingId cleared)');
+modalContent.querySelector('#btn-cancel-add').listeners.get('click')?.[0]?.();
+
+// [7] Multi-row datasets stay scoped per row: with two seeded rules, each
+// row's edit button must carry its own id (no cross-row data bleed).
+const allEditBtns = modalContent.querySelectorAll('.btn-edit-user-rule');
+assert.ok(allEditBtns.length >= 2, `Two rule rows each render an edit button (got ${allEditBtns.length})`);
+const r2 = [...allEditBtns].find((b) => b.dataset.id === 'user-r2');
+assert.ok(r2, 'Second row edit button carries its own dataset id user-r2');
+assert.strictEqual(r2.dataset.payload, '10.2.0.0/16', 'Second row edit button keeps its own payload');
+assert.strictEqual(r2.dataset.enabled, 'true', 'Second row (enabled) carries data-enabled true');
+
+console.log('✅ #/rules Modal CRUD Controls (Add/Edit/PUT/List) verification passed');
 console.log('🎉 All Subpage Architecture tests passed successfully!');
 process.exit(0);
