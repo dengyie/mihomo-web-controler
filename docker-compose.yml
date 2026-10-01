@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  mihomo-suite:
+    build: .
+    image: mihomo-suite:latest
+    container_name: mihomo-suite
+    restart: unless-stopped
+    ports:
+      - "2053:2053"
+    volumes:
+      - ./:/app
+      # 映射宿主机 Mihomo 配置根目录
+      - ~/.config/mihomo:/root/.config/mihomo
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai

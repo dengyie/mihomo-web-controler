@@ -1,25 +1,47 @@
-# mihomo-web-controler
+<div align="center">
 
-Mihomo (Clash Meta) Web 控制面板、自定义规则管理、多源订阅聚合与智能分流诊断网关套件。
+# 🚀 Mihomo Suite
 
-- **项目主页**：[https://github.com/dengyie/mihomo-web-controler](https://github.com/dengyie/mihomo-web-controler)
-- **作者**：dengyie
-- **许可证**：MIT
+**专为 Mihomo (Clash Meta) 打造的企业级自动化运维网关与智能分流诊断套件**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python Version](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Mihomo](https://img.shields.io/badge/Mihomo-Meta-E58325.svg)](https://github.com/MetaCubeX/mihomo)
+[![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)](docker-compose.yml)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/dengyie/mihomo-suite/pulls)
+
+[痛点与价值](#-为什么选择-mihomo-suite) • [核心特性](#-核心特性) • [系统架构](#-系统架构) • [快速起步](#-快速上手) • [Docker 部署](#-docker-容器化部署) • [API 规范](#-rest-api-接口规范) • [CLI 实战](#-命令行工具实战-cli)
+
+</div>
 
 ---
 
-## 🌟 核心特性
+### 💡 为什么选择 Mihomo Suite？
 
-### 1. 订阅与节点全生命周期管理 (`subscription-manager.py`)
-- **多格式全协议自适应解析**：
-  - 支持 **Clash 原生 YAML** 配置、**Base64 订阅源**。
+现有的前端控制面板（如 Yacd、Zashboard）重心主要在于“节点手动切换与简单延时测速”，但在多节点长期运行、无人值守的软路由、NAS 或 VPS 生产场景下，代理运维常面临一系列痛点：
+
+| 运维痛点场景 | 传统手工 / 外部方案 | Mihomo Suite 解决方案 |
+| :--- | :--- | :--- |
+| **多机场订阅整合** | 依赖第三方在线转换工具，节点配置与隐私 token 存在泄露风险 | **本地私有化聚合**：跨进程文件排他锁 (`fcntl`)，多格式协议自适应，内置正则自动去广告清洗 |
+| **配置变更易断网** | 修改 YAML 手抖打错缩进或非法字符，内核崩溃退出全屋断网 | **事务预检与原子回滚**：写入前强制执行 `mihomo -t` 语法预检，失败自动恢复历史备份，零宕机 |
+| **分流失灵与 DNS 污染** | 凭体感盲测连通性，ChatGPT/Claude/敏感站点常被国内 DNS 污染阻断 | **链路推演仿真引擎**：精准仿真内核匹配优先级，针对海外敏感及 AI 服务实施 DNS 污染主动研判与告警 |
+| **真实出口节点感知** | 单一测速源延迟高、信息不准，无法确切得知落地节点的真实 ISP 与归属地 | **全球并发出口竞速**：多权威源毫秒级并发探测，Web 顶栏常驻展示真实出口 IP、ISP 与国旗 Emoji |
+| **规则更新体验** | 暴力重启客户端导致正在传输的下载进程、SSH、游戏等长连接瞬间断开 | **平滑热重载守护 (Keeper)**：基于配置 Hash 幂等合并，调用原生 `PUT /configs?force=true` 零感生效 |
+
+---
+
+### ✨ 核心特性
+
+#### 1. 订阅与节点全生命周期管理 (`subscription-manager.py`)
+- **全协议多格式自适应解析**：
+  - 自动识别并解析 **Clash 原生 YAML**、**Base64 订阅源**。
   - 支持单节点与批量节点 URI 解析，涵盖 **Shadowsocks (`ss://`)**（含 SIP002/Plugin 扩展）、**VMess (`vmess://`)**、**VLESS (`vless://`)**、**Trojan (`trojan://`)**、**Hysteria2 (`hysteria2://` / `hy2://`)**。
-  - 健壮的 Base64 容错解码（自动适配 URL-Safe 字符与缺失填充符）。
-- **智能垃圾节点过滤**：
+  - 健壮的 Base64 容错解码（自动处理 URL-Safe 字符与缺失填充符）。
+- **智能垃圾节点清洗**：
   - 内置智能正则过滤器，自动剔除包含“剩余流量 / 官网 / 套餐 / 到期 / 公告 / 流量 / 重置 / 交流群 / 客服”等非代理展示性节点。
   - 支持按订阅自定义独立的排除正则规则。
 - **命名空间前缀隔离**：
-  - 自动为节点名注入 `[{订阅名称}] {节点原名}` 前缀，彻底规避跨机场订阅的节点同名冲突。
+  - 自动为节点名注入 `[{订阅名称}] {节点原名}` 前缀，彻底规避跨机场订阅的节点重名冲突。
 - **元数据跟踪与原子聚合**：
   - 订阅状态、更新时间、节点计数持久化存储于 `subscriptions/meta.json`。
   - 原始响应自动缓存于 `subscriptions/raw/` 目录，便于离线恢复与历史审计。
@@ -27,11 +49,9 @@ Mihomo (Clash Meta) Web 控制面板、自定义规则管理、多源订阅聚�
 - **Web UI 订阅管理中心**：
   - 规则页顶部一键唤起模态窗，支持一键添加订阅、启用/停用切换、手动刷新拉取、批量 RAW 节点粘贴导入与订阅删除。
 
----
-
-### 2. 出口 IP 毫秒级多源竞速诊断 (`gateway.py`)
+#### 2. 出口 IP 毫秒级多源竞速诊断 (`gateway.py`)
 - **多数据源并发竞速探测**：
-  - 并发探测全球优质 IP 识别节点（`ipinfo.io`、`cloudflare.com/cdn-cgi/trace`、`api.ipify.org`、`ip-api.com`），设置严格的 3.5s 单源超时控制。
+  - 并发探测全球权威 IP 识别节点（`ipinfo.io`、`cloudflare.com/cdn-cgi/trace`、`api.ipify.org`、`ip-api.com`），设置严格的 3.5s 单源超时控制。
   - 毫秒级统计各数据源 RTT 往返时延，动态甄选首位最快响应数据（`fastest`）并输出全量比对结果（`all_results`）。
 - **多维度出口特征解析**：
   - 实时获取当前实际公网出口 IP、国家/地区代码（自动映射为 Flag Emoji 旗帜）、所属城市、ISP 运营商与 ASN 路由信息。
@@ -40,9 +60,7 @@ Mihomo (Clash Meta) Web 控制面板、自定义规则管理、多源订阅聚�
   - 顶部导航栏常驻展示当前出口 IP、国旗与测速延迟，状态即时更新。
   - 点击弹出交互式信息卡，直观展示 ISP、ASN、地理位置与多源竞速延迟列表，并支持一键强制刷新探测。
 
----
-
-### 3. 规则分流与 DNS 污染推演模拟器 (`rules-reconciler.py`)
+#### 3. 规则分流与 DNS 污染推演模拟器 (`rules-reconciler.py`)
 - **真实分流链推演匹配**：
   - 严格依据 Mihomo 内核的分流匹配优先级与语义模拟推演：`DOMAIN` ➡️ `DOMAIN-SUFFIX` ➡️ `DOMAIN-KEYWORD` ➡️ `IP-CIDR / IP-CIDR6` ➡️ `GEOSITE`（内置主流分类启发式映射）➡️ `GEOIP` ➡️ `MATCH` / `DEFAULT`。
   - 自动加载当前生效配置（`config.mac-merged.yaml` 或 `config.yaml`），精确定位命中的规则类型、匹配载荷（Payload）、分流策略目标（Target）及规则索引行号。
@@ -57,36 +75,28 @@ Mihomo (Clash Meta) Web 控制面板、自定义规则管理、多源订阅聚�
 - **CLI 离线推演支持**：
   - 支持通过终端命令 `python3 clash/rules-reconciler.py --simulate <domain/ip>` 快速离线调试。
 
----
-
-### 4. 可视化自定义规则管理 (`rules-reconciler.py` & UI)
+#### 4. 可视化自定义规则管理 (`rules-reconciler.py` & UI)
 - **Web UI 原生集成**：
   - 规则页原生集成自定义规则管理 Icon 与操作抽屉。
   - 支持 `DOMAIN-SUFFIX`、`DOMAIN`、`DOMAIN-KEYWORD`、`IP-CIDR`、`IP-CIDR6`、`GEOSITE`、`GEOIP` 等标准规则类型。
   - 动态获取当前所有可用策略组（Target）供下拉选择。
   - 规则语法实时生成预览、安全合法性校验（防字符注入）、删除二次确认与全字段 XSS 转义。
 
----
-
-### 5. 多层安全与可靠性保障
+#### 5. 多层安全与反脆弱保障
 - **语法预检**：写入前自动调用 `mihomo -t` 对候选配置进行真实语法校验。
 - **事务性回滚**：任一步骤失败（含 Controller 异常）自动通过历史备份原子恢复旧配置。
 - **精准前缀剥离**：删除用户自定义规则时，绝对不会误伤订阅原有的同名规则。
 - **NFS 跨进程排他锁**：使用 `fcntl.flock` 保障多并发操作安全。
-- **恒定时间鉴权**：`consteq` 先对齐非空等长再 `secrets.compare_digest`（兼容 CI Python 3.10 不等长抛错）。
+- **恒定时间鉴权**：`consteq` 先对齐非空等长再 `secrets.compare_digest`，有效抵御时序分析攻击。
 - **模块热重载**：网关检测到 Reconciler 与 Subscription Manager 脚本时间戳（`mtime`）变更时自动热重载，无需重启网关进程。
 
----
-
-### 6. 安全 API 网关与双机跨节点协同 (`gateway.py`)
+#### 6. 安全 API 网关与双机跨节点协同 (`gateway.py`)
 - 单源对外服务（静态资源托管 + API 反向代理 + WebSocket 流量转发）。
-- 服务端注入 Mihomo `.controller-secret`，前端全程零 Secret 暴露（`index.html` **不再**把 `panel.password` 写进页面 / localStorage）。
+- 服务端注入 Mihomo `.controller-secret`，前端全程零 Secret 暴露（`index.html` 不再将 `panel.password` 暴露在页面或本地存储中）。
 - **双机集群智能路由**：自动识别本端环境（`tebi` macOS 主机 / `pxed` Linux VPS 主机），透明代理跨节点流量（如 `/panel/pxed/api/*` 与 `/panel/tebi/api/*`）。
 - **NFS 静态字节缓存**：针对分布式 NFS 文件系统设计高效的静态资源内存缓存（`_STATIC_CACHE`），结合 `mtime_ns` / `size` 自动失效。
 
----
-
-### 7. Keeper 守护协同 (`clash-keeper-loop.sh`)
+#### 7. Keeper 守护协同 (`clash-keeper-loop.sh`)
 - 每 120s 周期自检与重放。
 - 基于 Hash 比对实现幂等合并：配置未变更时不写磁盘、不产生冗余备份、不触发重复 reload。
 - 订阅覆盖或主配置重建后，用户规则自动保活重放。
@@ -94,60 +104,44 @@ Mihomo (Clash Meta) Web 控制面板、自定义规则管理、多源订阅聚�
 
 ---
 
-## 🏗️ 架构拓扑
+### 🏗️ 系统架构
 
 ```text
-                                  浏览器 (Web UI / Zashboard)
-                                                │ HTTPS
-                                                ▼
-                                    Cloudflare Tunnel / 反向代理
-                                                │
-                                                ▼
-                     ┌─────────────────────────────────────────────────────┐
-                     │           127.0.0.1:2053 (gateway.py)              │
-                     │  - Bearer Token 恒定时间鉴权                         │
-                     │  - NFS 静态资源内存缓存 (_STATIC_CACHE)               │
-                     │  - 跨节点智能透明转发 (/panel/pxed/* <-> /panel/tebi/*)│
-                     └──────┬───────────────────────┬──────────────────────┘
-                            │                       │
-      ┌─────────────────────┼───────────────────────┼────────────────────────┐
-      ▼                     ▼                       ▼                        ▼
-[静态资源托管]       [代理 Controller API]    [出口 IP 竞速诊断]        [业务扩展 REST API]
-zashboard/dist/      /panel/api/*             /panel/api/diagnostics/  /panel/api/subscriptions*
-assets/user-rules-ui   │ (注入 Secret)         egress-ip                /panel/api/rules/simulate
-                       ▼ (HTTP / WebSocket)         │                   /panel/api/user-rules*
-                 127.0.0.1:9090                     │                        │
-             (主 Mihomo Controller)                 ▼                        ▼
-                                             并发竞速探测:            ┌───────────────────────┐
-                                             - ipinfo.io              │ clash/                │
-                                             - cloudflare trace       │ rules-reconciler.py   │
-                                             - api.ipify.org          │ subscription-manager.py│
-                                             - ip-api.com             └──────────┬────────────┘
-                                                                                 │
-                            ┌────────────────────────────────────────────────────┴───────────────────────────────────────┐
-                            │                                                                                            │
-                            ▼ (fcntl.flock 排他锁)                                                                       ▼ (fcntl.flock 排他锁)
-           ┌──────────────────────────────────────┐                                                    ┌──────────────────────────────────────┐
-           │        Subscription Engine           │                                                    │            Rules Engine              │
-           ├──────────────────────────────────────┤                                                    ├──────────────────────────────────────┤
-           │ 1. 多格式协议解析 (YAML/B64/URI)      │                                                    │ 1. 严格 Schema / 域名 / CIDR 校验     │
-           │ 2. 正则垃圾公告节点过滤               │                                                    │ 2. 写入权威源: rules/user-rules.yaml │
-           │ 3. 命名空间前缀隔离 [{sub}] {node}    │                                                    │ 3. 路由规则推演 & DNS 污染风险研判   │
-           │ 4. 元数据存储: subscriptions/meta.json │                                                    │ 4. mihomo -t 候选语法预检            │
-           │ 5. 缓存持久化: subscriptions/raw/     │                                                    │ 5. 自动生成 .pre-user-rules 备份     │
-           │ 6. 原子聚合: airport-merged-sub.yaml │                                                    │ 6. 原子替换 config.yaml / mac-merged │
-           └──────────────────────────────────────┘                                                    │ 7. PUT /configs?force=true 热重载    │
-                                                                                                       └──────────────────────────────────────┘
+       [ 机场 A (YAML) ]     [ 机场 B (Base64) ]     [ 自建节点 (vless/hy2) ]
+               │                     │                       │
+               └─────────────────────┼───────────────────────┘
+                                     ▼
+      ┌─────────────────────────────────────────────────────────────┐
+      │                        Mihomo Suite                         │
+      │                                                             │
+      │  ┌─────────────────────────┐   ┌─────────────────────────┐  │
+      │  │  subscription-manager   │   │    rules-reconciler     │  │
+      │  │  · 格式清洗与广告过滤    │   │  · 分流推演仿真引擎     │  │
+      │  │  · fcntl 原子文件锁     │   │  · 敏感服务 DNS 污染研判│  │
+      │  └────────────┬────────────┘   └────────────┬────────────┘  │
+      │               │                             │               │
+      │               ▼                             ▼               │
+      │  ┌───────────────────────────────────────────────────────┐  │
+      │  │         Security Gateway & Diagnostics Engine         │  │
+      │  │  · 恒定时间鉴权安全隔离   · 出口 IP / ISP 多源毫秒竞速  │  │
+      │  └──────────────────────────┬────────────────────────────┘  │
+      └─────────────────────────────┼───────────────────────────────┘
+                                    │ 语法预检 (mihomo -t)
+                                    │ 零感热重载 (PUT /configs?force=true)
+                                    ▼
+                         ┌──────────────────────┐
+                         │  Mihomo 内核实例     │
+                         └──────────────────────┘
 ```
 
 ---
 
-## 📂 目录结构
+### 📂 目录结构
 
 ```text
 .
 ├── clash/
-│   ├── rules-reconciler.py         # 核心规则调度器 (校验、合并、事务回滚、Mihomo Controller 热重载、分流/DNS推演)
+│   ├── rules-reconciler.py         # 核心规则调度器 (校验、合并、事务回滚、Controller 热重载、分流/DNS推演)
 │   ├── subscription-manager.py     # 订阅与节点聚合管理器 (多协议解析、垃圾过滤、命名隔离、原子输出)
 │   ├── apply-local-import.py       # 本地节点持久化与注入脚本
 │   └── clash-keeper-loop.sh        # Keeper 常驻守护脚本 (120s 周期幂等自检)
@@ -168,12 +162,60 @@ assets/user-rules-ui   │ (注入 Secret)         egress-ip                /pan
 │   ├── test_rule_simulation.py     # 规则分流与 DNS 污染推演测试
 │   ├── test_subscription_manager.py # 订阅管理器全协议解析与聚合测试
 │   └── test_ui_bundle.mjs          # 前端 DOM 注入与交互组件测试
+├── Dockerfile                      # 生产级 Docker 容器构建文件
+├── docker-compose.yml              # Docker Compose 一键编排文件
+├── requirements.txt                # Python 依赖清单
 └── package.json                    # 前端构建与测试套件配置
 ```
 
 ---
 
-## 🔌 REST API 接口规范
+### ⚡ 快速上手
+
+#### 方式一：直接运行
+
+##### 1. 环境准备
+* Python 3.9+
+* 已安装运行的 [Mihomo (Clash Meta)](https://github.com/MetaCubeX/mihomo) 内核（开启 External Controller）
+* Linux / macOS 运行环境
+
+##### 2. 安装与运行
+```bash
+# 克隆仓库
+git clone https://github.com/dengyie/mihomo-suite.git
+cd mihomo-suite
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 初始化配置与密钥
+touch zashboard/panel.password      # 填入 Web 面板访问口令
+touch clash/.controller-secret     # 填入与 Mihomo 对应的 External Controller Secret
+
+# 启动网关
+chmod +x zashboard/start-gateway.sh clash/clash-keeper-loop.sh
+./zashboard/start-gateway.sh
+```
+
+打开浏览器访问 `http://127.0.0.1:2053/panel/` 即可进入管理面板。
+
+---
+
+### 🐳 Docker 容器化部署
+
+如果你希望在独立容器中运行 Mihomo Suite 避免污染宿主机环境，可使用 Docker 一键运行：
+
+```bash
+# 启动容器
+docker compose up -d
+
+# 查看运行日志
+docker compose logs -f
+```
+
+---
+
+### 🔌 REST API 接口规范
 
 网关在 `/panel/api/*` 路径下提供完整的 RESTful 接口体系，调用时需携带 `Authorization: Bearer <PANEL_PASSWORD>` 请求头：
 
@@ -194,21 +236,7 @@ assets/user-rules-ui   │ (注入 Secret)         egress-ip                /pan
 
 ---
 
-## 🚀 启动与使用指南
-
-### 1. 启动 API 网关与 Web 面板
-```bash
-# 方式 1: 直接使用 Python 启动
-python3 zashboard/gateway.py
-
-# 方式 2: 使用包装脚本启动
-bash zashboard/start-gateway.sh
-```
-网关默认监听 `0.0.0.0:2053`，浏览器访问 `http://127.0.0.1:2053/panel/` 即可进入 Web 控制面板。
-
----
-
-### 2. 命令行工具实战 (CLI)
+### 💻 命令行工具实战 (CLI)
 
 #### 订阅管理器 (`subscription-manager.py`)
 ```bash
@@ -252,34 +280,42 @@ python3 clash/rules-reconciler.py --reconcile
 
 ---
 
-### 3. 运行自动化测试套件
-本项目包含完整的后端 Python 单元测试与前端 UI 模拟测试：
+### 🧪 自动化测试与质量保障
+
+本项目包含严格的 Python 单元测试与前端 UI 模拟测试，确保任何改动均符合生产级稳定性：
 
 ```bash
-# 运行全部 Python 测试 (鉴权、缓存、订阅管理、推演、API 网关)
+# 运行完整自动化测试套件 (包含 UI 测试与全部 Python 测试)
+npm test
+
+# 单独运行 Python 测试 (鉴权、缓存、订阅管理、推演、API 网关)
 python3 -m pytest tests/
 
-# 运行前端 UI 模拟单元测试
+# 单独运行前端 UI 模拟测试
 node tests/test_ui_bundle.mjs
 ```
 
 ---
 
-## 🔐 敏感信息过滤与安全说明
+### 🔐 敏感信息过滤与安全设计准则
 
-- 本仓库严格遵循安全最佳实践，生产环境真实密码（`panel.password`）与控制器密钥（`.controller-secret`）均已纳入 `.gitignore`。
-- 首次部署时，请在 `zashboard/panel.password` 与 `clash/.controller-secret` 中填入对应环境的实际口令密钥。浏览器打开 `/panel/` 后在 Setup 里填写同一口令；服务端 **不会** 把口令注入 HTML。
-- 订阅拉取：仅 http/https、解析后拒绝私网/环回/链路本地/云元数据、**不跟随重定向**、连接钉在校验时的 IP、响应体上限 8MiB。
-- Mihomo 反代：`/panel/api` 只转发面板实际使用的 Clash Meta 路径；`/delay?url=` 仅允许 generate_204 / cloudflare trace。
-- 规则推演 `config_path` 必须落在 `CLASH_ROOT` 下。死节点清理仅 `POST`，探测 `airports/local-nodes.yaml` 后写入 `disabled-nodes.txt` 并从该文件删除失效节点（不改 VPS `config.yaml`）。
-- 面板添加订阅 / 导入节点默认 `skip_merge` + TCP 探活后注入 `airports/local-nodes.yaml`。
-- 客户端 YAML `allow-lan` 默认 `false`；需要局域网入站时设 `CLIENT_ALLOW_LAN=1`。
-- `apply-local-import.py` 默认读 `airports/local-nodes.yaml`。节点文件只放 `proxies` 与简单名单 `groups`（`vps-import` / `google` / `grok`）；url-test、PROXY、Grok、Google 策略在脚本层。没有 `groups.vps-import` 时跳过，避免把全量节点灌进 VPS `🌐 本机导入`。`APPLY_LOCAL_IMPORT_FILE` 仍可覆盖路径，但必须落在 `CLASH_ROOT/airports/` 下。
+- **密钥隔离机制**：生产环境真实密码（`panel.password`）与控制器密钥（`.controller-secret`）已严格纳入 `.gitignore`。首次部署时请在 `zashboard/panel.password` 与 `clash/.controller-secret` 中填入对应口令。服务端不会将口令注入 HTML，浏览器打开 `/panel/` 后在 Setup 中输入相同密码即可。
+- **网络请求防御 (SSRF)**：订阅拉取仅允许 `http/https` 协议；解析后拒绝私网、环回（`127.0.0.1`）、链路本地及云厂商元数据地址；**不跟随重定向**；连接强绑定在校验时的 IP；响应体严格限制最大 8MiB。
+- **Mihomo 反代限制**：`/panel/api` 仅转发面板实际使用的 Clash Meta 白名单路径；`/delay?url=` 仅放行 `generate_204` 与 `cloudflare trace` 探测目标。
+- **配置与导入边界**：规则推演 `config_path` 严格限制在 `CLASH_ROOT` 目录内。死节点清理仅允许 `POST`，探测 `airports/local-nodes.yaml` 后写入 `disabled-nodes.txt` 并从该文件剔除失效节点（不污染主 `config.yaml`）。
+- **客户端入站**：YAML 模板 `allow-lan` 默认设为 `false`；如需局域网共享，显式声明 `CLIENT_ALLOW_LAN=1`。
+- **导入策略注入**：`apply-local-import.py` 默认读取 `airports/local-nodes.yaml`。节点文件仅存放 `proxies` 与简单名单 `groups`（`vps-import` / `google` / `grok`），上层策略由脚本编排。在缺失 `groups.vps-import` 时自动跳过，避免将全量节点意外合并到 VPS `🌐 本机导入` 策略中。
 
 ---
 
-## 📄 License & Attribution
+### 🤝 参与贡献
 
-- **Author**: dengyie ([https://github.com/dengyie](https://github.com/dengyie))
-- **Repository**: [https://github.com/dengyie/mihomo-web-controler](https://github.com/dengyie/mihomo-web-controler)
-- **License**: MIT
+欢迎提交 Issue 和 Pull Request！
+- 如遇到任何运行问题或发现 Bug，请提交 [GitHub Issue](https://github.com/dengyie/mihomo-suite/issues)。
+- 如果您觉得本项目对您有帮助，欢迎点亮右上角 ⭐️ **Star** 鼓励作者！
+
+---
+
+### 📄 开源许可证
+
+本项目基于 [MIT License](LICENSE) 开源发布。
